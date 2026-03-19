@@ -1,0 +1,280 @@
+import os
+import sys
+import json
+import subprocess
+import argparse
+import re
+from pathlib import Path
+
+# Add SoulX-Singer to path to import its modules
+SOULX_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "SoulX-Singer"))
+sys.path.append(SOULX_DIR)
+
+try:
+    from preprocess.tools.midi_parser import MidiParser, midi2notes
+except ImportError:
+    print("Warning: Could not import MidiParser. Make sure dependencies (mido, librosa) are installed.")
+    MidiParser = None
+
+# Set up DALI import path
+try:
+    import DALI as dali_code
+except ImportError:
+    dali_code_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "DALI", "code"))
+    sys.path.append(dali_code_path)
+    try:
+        import DALI as dali_code
+    except ImportError:
+        print("Error: Could not import DALI dataset library. Please ensure it is available.")
+        sys.exit(1)
+
+def parse_args():
+    parser = argparse.ArgumentParser(description="Extract DALI annotations to SoulX-Singer JSON and run inference.")
+    parser.add_argument("--dali_id", default="006b5d1db6a447039c30443310b60c6f", help="DALI dataset entry ID")
+    parser.add_argument("--language", default="English", help="Language for grapheme-to-phoneme (default: English)")
+    parser.add_argument("--output_dir", default=os.path.abspath(os.path.dirname(__file__)), help="Output directory")
+    parser.add_argument("--no_continuations", action="store_true", help="Disable merging of syllable note continuations")
+    return parser.parse_args()
+
+def freq_to_midi(freq):
+    """Convert frequency in Hz to closest MIDI note number (0-127)."""
+    if freq <= 0:
+        return 0
+    import math
+    return int(round(69 + 12 * math.log2(freq / 440.0)))
+
+def process_dali_to_soulx(dali_id="006b5d1db6a447039c30443310b60c6f", language="English", output_dir=None, use_continuations=True, mode="paragraph", n_lines=4, use_f0=False):
+    if output_dir is None:
+        output_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "Data"))
+    
+    os.makedirs(output_dir, exist_ok=True)
+    dali_data_file = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "DALI", "DALI_v2.0", "annot_tismir", f"{dali_id}.gz"))
+    
+    print(f"Loading DALI dataset entry from {dali_data_file} ...")
+    try:
+        target_entry = dali_code.get_an_entry(dali_data_file)
+    except Exception as e:
+        print(f"Error loading DALI entry: {e}")
+        return
+        
+    if target_entry is None:
+        print("Failed to load test song.")
+        return
+        
+    print(f"Successfully loaded song: {target_entry.info['title']} by {target_entry.info['artist']}")
+
+    try:
+        target_entry.vertical2horizontal() 
+    except Exception:
+        pass # Already horizontal
+    
+    notes_annot = target_entry.annotations['annot'].get('notes', [])
+    words_annot = target_entry.annotations['annot'].get('words', [])
+    lines_annot = target_entry.annotations['annot'].get('lines', [])
+    paragraphs_annot = target_entry.annotations['annot'].get('paragraphs', [])
+    
+    if not notes_annot or not words_annot or not lines_annot or not paragraphs_annot:
+        print("Missing required annotations (notes, words, lines, or paragraphs).")
+        return
+
+    print(f"Generating SoulX-Singer annotations using mode: {mode}...")
+    
+    try:
+        from preprocess.tools.midi_parser import notes2meta, Note
+        
+        # Group notes based on the selected mode
+        chunks = [] # each chunk is a list of note indices
+        chunk_start_times = []
+        chunk_names = []
+
+        if mode == "test":
+            for line_idx, line_info in enumerate(lines_annot):
+                line_notes = []
+                for idx, note_info in enumerate(notes_annot):
+                    if words_annot[note_info['index']]['index'] == line_idx:
+                        line_notes.append(idx)
+                if line_notes:
+                    chunks.append(line_notes)
+                    chunk_start_times.append(line_info['time'][0])
+                    chunk_names.append("line_test")
+                    break
+
+        elif mode == "paragraph":
+            for para_idx, para_info in enumerate(paragraphs_annot):
+                para_notes = []
+                for idx, note_info in enumerate(notes_annot):
+                    line_idx = words_annot[note_info['index']]['index']
+                    if lines_annot[line_idx]['index'] == para_idx:
+                        para_notes.append(idx)
+                if para_notes:
+                    chunks.append(para_notes)
+                    chunk_start_times.append(para_info['time'][0])
+                    chunk_names.append(f"paragraph_{para_idx}")
+
+        elif mode == "line":
+            for line_idx, line_info in enumerate(lines_annot):
+                line_notes = []
+                for idx, note_info in enumerate(notes_annot):
+                    if words_annot[note_info['index']]['index'] == line_idx:
+                        line_notes.append(idx)
+                if line_notes:
+                    chunks.append(line_notes)
+                    chunk_start_times.append(line_info['time'][0])
+                    chunk_names.append(f"line_{line_idx}")
+
+        elif mode == "n-line":
+            chunk_idx = 0
+            for para_idx, para_info in enumerate(paragraphs_annot):
+                para_lines = [line_idx for line_idx, line_info in enumerate(lines_annot) if line_info['index'] == para_idx]
+                
+                for i in range(0, len(para_lines), n_lines):
+                    group_lines = para_lines[i:i+n_lines]
+                    group_notes = []
+                    for idx, note_info in enumerate(notes_annot):
+                        if words_annot[note_info['index']]['index'] in group_lines:
+                            group_notes.append(idx)
+                    
+                    if group_notes:
+                        chunks.append(group_notes)
+                        chunk_start_times.append(lines_annot[group_lines[0]]['time'][0])
+                        chunk_names.append(f"chunk_{chunk_idx}")
+                        chunk_idx += 1
+
+        for chunk_i, (note_indices, chunk_start_sec, chunk_name) in enumerate(zip(chunks, chunk_start_times, chunk_names)):
+            
+            # Setup output directory for this chunk
+            chunk_out_dir = os.path.join(output_dir, dali_id, chunk_name)
+            os.makedirs(chunk_out_dir, exist_ok=True)
+            meta_path = os.path.join(chunk_out_dir, "music.json")
+            
+            soulx_notes = []
+            for idx in note_indices:
+                note_info = notes_annot[idx]
+                word_idx = note_info['index']
+                word_info = words_annot[word_idx]
+                    
+                word_text = word_info['text']
+                
+                is_continuation = False
+                if use_continuations and idx > 0 and notes_annot[idx-1]['index'] == word_idx:
+                    is_continuation = True
+
+                if use_continuations:
+                    if is_continuation:
+                        text = "-"
+                        note_type = 3
+                    else:
+                        text = word_text
+                        note_type = 2
+                else:
+                    text = note_info['text']
+                    note_type = 2
+                    
+                start_time_sec = note_info['time'][0] - chunk_start_sec
+                end_time_sec = note_info['time'][1] - chunk_start_sec
+                dur_s = end_time_sec - start_time_sec
+                
+                freq_list = note_info['freq']
+                if isinstance(freq_list, (list, tuple)) and len(freq_list) > 0:
+                    avg_freq = sum(freq_list) / len(freq_list)
+                    midi_pitch = freq_to_midi(avg_freq)
+                else:
+                    midi_pitch = 60
+                    
+                if use_continuations and idx < len(notes_annot) - 1:
+                    next_idx = idx + 1
+                    next_note = notes_annot[next_idx]
+                    if next_note['index'] == word_idx:
+                        next_start_time_sec = next_note['time'][0] - chunk_start_sec
+                        dur_s = next_start_time_sec - start_time_sec
+                        
+                soulx_notes.append(
+                    Note(
+                        start_s=float(start_time_sec),
+                        note_dur=float(dur_s),
+                        note_text=str(text),
+                        note_pitch=int(midi_pitch),
+                        note_type=int(note_type)
+                    )
+                )
+            
+            if len(soulx_notes) > 0:
+                notes2meta(
+                    soulx_notes,
+                    meta_path,
+                    vocal_file=None, # Synthesizing, no original vocal provided
+                    language=language,
+                    pitch_extractor=None
+                )
+                
+                if use_f0:
+                    import numpy as np
+                    with open(meta_path, "r", encoding="utf-8") as f:
+                        meta_list = json.load(f)
+                    
+                    time_res = 0.02
+                    end_time_total = notes_annot[-1]['time'][1] + 10.0
+                    try:
+                        full_f0_vector = dali_code.annot2vector(notes_annot, end_time_total, time_res, type='melody')
+                        
+                        sum_dur = sum([float(x) for x in meta_list[0]['duration'].split()])
+                        expected_frames = int(round(sum_dur / time_res))
+                        
+                        start_frame = int(chunk_start_sec / time_res)
+                        chunk_f0 = full_f0_vector[start_frame : start_frame + expected_frames]
+                        if len(chunk_f0) < expected_frames:
+                            chunk_f0 = np.pad(chunk_f0, (0, expected_frames - len(chunk_f0)))
+                        
+                        meta_list[0]['f0'] = " ".join([str(round(f, 1)) for f in chunk_f0])
+                        with open(meta_path, "w", encoding="utf-8") as f:
+                            json.dump(meta_list, f, ensure_ascii=False, indent=2)
+                    except Exception as e:
+                        print(f"Warning: Failed to extract F0 for SoulX-Singer: {e}")
+                        use_f0 = False
+                
+                cmd_control = "melody" if use_f0 else "score"
+                
+                print(f"Running SoulX-Singer inference for {chunk_name}...")
+                
+                # Path setup for inference
+                model_path = os.path.join(SOULX_DIR, "pretrained_models", "SoulX-Singer", "model.pt")
+                config_path = os.path.join(SOULX_DIR, "soulxsinger", "config", "soulxsinger.yaml")
+                
+                # For zero-shot voice cloning, use the example prompt
+                prompt_wav_path = os.path.join(SOULX_DIR, "example", "transcriptions", "WillStetsonSample", "vocal.wav")
+                prompt_metadata_path = os.path.join(SOULX_DIR, "example", "transcriptions", "WillStetsonSample", "metadata.json")
+                phoneset_path = os.path.join(SOULX_DIR, "soulxsinger", "utils", "phoneme", "phone_set.json")
+                
+                cmd = [
+                    r"C:\Users\archi\miniconda3\envs\soulxsinger\python.exe", "-m", "cli.inference",
+                    "--device", "cuda",
+                    "--model_path", model_path,
+                    "--config", config_path,
+                    "--prompt_wav_path", prompt_wav_path,
+                    "--prompt_metadata_path", prompt_metadata_path,
+                    "--target_metadata_path", meta_path,
+                    "--phoneset_path", phoneset_path,
+                    "--save_dir", chunk_out_dir,
+                    "--auto_shift",
+                    "--pitch_shift", "0",
+                    "--control", cmd_control
+                ]
+                
+                env = os.environ.copy()
+                env["PYTHONPATH"] = SOULX_DIR + os.pathsep + env.get("PYTHONPATH", "")
+                
+                try:
+                    subprocess.run(cmd, env=env, cwd=SOULX_DIR, check=True)
+                    print(f"Successfully generated wav for {chunk_name} in {chunk_out_dir}")
+                except subprocess.CalledProcessError as e:
+                    print(f"Inference failed for {chunk_name} with code {e.returncode}")
+
+    except Exception as e:
+        print(f"Error extracting metadata from DALI annotations: {e}")
+        return
+
+if __name__ == "__main__":
+    print("Running demo for DataSynthesizer module...")
+    process_dali_to_soulx()
+
+#conda run -n data_synthesizer python synthesizePrior.py
