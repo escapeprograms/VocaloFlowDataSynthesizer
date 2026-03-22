@@ -24,15 +24,18 @@ if not os.path.exists(dependency_dir):
     print(f"Error: Could not find UtauGenerate at {dependency_dir}")
     sys.exit(1)
 
+# Add the directory to PATH so native DLLs like onnxruntime.dll can be found by Pythonnet
+bin_dir = os.path.dirname(dependency_dir)
+native_dir = os.path.join(bin_dir, "runtimes", "win-x64", "native")
+os.environ["PATH"] = bin_dir + os.pathsep + native_dir + os.pathsep + os.environ.get("PATH", "")
+
 clr.AddReference(dependency_dir)
 from UtauGenerate import Player
 import System
 
-def freq_to_midi(freq):
-    """Convert frequency in Hz to closest MIDI note number (0-127)."""
-    if freq <= 0:
-        return 0
-    return int(round(69 + 12 * math.log2(freq / 440.0)))
+from grab_midi import get_midi_pitch, freq_to_midi
+from grab_f0 import load_f0_data, get_continuous_f0, add_pitch_bends_to_array
+from determine_chunks import get_chunks
 
 def process_dali_to_ustx(output_dir=None, use_continuations=True, dali_id="006b5d1db6a447039c30443310b60c6f", mode="paragraph", n_lines=4, use_f0=False):
     if output_dir is None:
@@ -70,21 +73,7 @@ def process_dali_to_ustx(output_dir=None, use_continuations=True, dali_id="006b5
     
     # 3. Load continuous F0 curves from .f0.npz
     dali_base_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "DALI"))
-    f0_npz_path = os.path.abspath(os.path.join(dali_base_path, "f0_v2.0", "f0_tismir", f"{dali_id}.f0.npz"))
-    f0_matrix, f0_freqs, f0_time_r = None, None, None
-    if os.path.exists(f0_npz_path):
-        try:
-            f0_data = np.load(f0_npz_path)
-            f0_matrix = f0_data['f0']
-            f0_freqs = f0_data['freqs']
-            f0_time_r = f0_data['time_r'].item() if 'time_r' in f0_data.files else 0.058049886621315196
-            print(f"Successfully loaded continuous f0 curves from {f0_npz_path}")
-        except Exception as e:
-            print(f"Warning: Could not load continuous f0 curves from {f0_npz_path}: {e}")
-            f0_matrix = None
-    else:
-        print(f"Warning: F0 curve file NOT FOUND at {f0_npz_path}")
-        f0_matrix = None
+    f0_matrix, f0_freqs, f0_time_r = load_f0_data(dali_id, dali_base_path)
         
     if not notes_annot or not words_annot or not lines_annot or not paragraphs_annot:
         print("Missing required annotations (notes, words, lines, or paragraphs).")
@@ -93,62 +82,7 @@ def process_dali_to_ustx(output_dir=None, use_continuations=True, dali_id="006b5
     print(f"Generating ustx sequences using mode: {mode}...")
 
     # Group notes based on the selected mode
-    chunks = [] # each chunk is a list of note indices
-    chunk_start_times = []
-    chunk_names = []
-
-    if mode == "test":
-        for line_idx, line_info in enumerate(lines_annot):
-            line_notes = []
-            for idx, note_info in enumerate(notes_annot):
-                if words_annot[note_info['index']]['index'] == line_idx:
-                    line_notes.append(idx)
-            if line_notes:
-                chunks.append(line_notes)
-                chunk_start_times.append(line_info['time'][0])
-                chunk_names.append("line_test")
-                break
-
-    elif mode == "paragraph":
-        for para_idx, para_info in enumerate(paragraphs_annot):
-            para_notes = []
-            for idx, note_info in enumerate(notes_annot):
-                line_idx = words_annot[note_info['index']]['index']
-                if lines_annot[line_idx]['index'] == para_idx:
-                    para_notes.append(idx)
-            if para_notes:
-                chunks.append(para_notes)
-                chunk_start_times.append(para_info['time'][0])
-                chunk_names.append(f"paragraph_{para_idx}")
-
-    elif mode == "line":
-        for line_idx, line_info in enumerate(lines_annot):
-            line_notes = []
-            for idx, note_info in enumerate(notes_annot):
-                if words_annot[note_info['index']]['index'] == line_idx:
-                    line_notes.append(idx)
-            if line_notes:
-                chunks.append(line_notes)
-                chunk_start_times.append(line_info['time'][0])
-                chunk_names.append(f"line_{line_idx}")
-
-    elif mode == "n-line":
-        chunk_idx = 0
-        for para_idx, para_info in enumerate(paragraphs_annot):
-            para_lines = [line_idx for line_idx, line_info in enumerate(lines_annot) if line_info['index'] == para_idx]
-            
-            for i in range(0, len(para_lines), n_lines):
-                group_lines = para_lines[i:i+n_lines]
-                group_notes = []
-                for idx, note_info in enumerate(notes_annot):
-                    if words_annot[note_info['index']]['index'] in group_lines:
-                        group_notes.append(idx)
-                
-                if group_notes:
-                    chunks.append(group_notes)
-                    chunk_start_times.append(lines_annot[group_lines[0]]['time'][0])
-                    chunk_names.append(f"chunk_{chunk_idx}")
-                    chunk_idx += 1
+    chunks, chunk_start_times, chunk_names = get_chunks(mode, notes_annot, words_annot, lines_annot, paragraphs_annot, n_lines=n_lines)
 
     for chunk_i, (note_indices, chunk_start_sec, chunk_name) in enumerate(zip(chunks, chunk_start_times, chunk_names)):
         
@@ -178,17 +112,13 @@ def process_dali_to_ustx(output_dir=None, use_continuations=True, dali_id="006b5
                 else:
                     text = word_text
             else:
-                text = "a"
+                text = note_info['text']
                 
             start_time_sec = note_info['time'][0] - chunk_start_sec
             end_time_sec = note_info['time'][1] - chunk_start_sec
             
             freq_list = note_info['freq']
-            if isinstance(freq_list, (list, tuple)) and len(freq_list) > 0:
-                avg_freq = sum(freq_list) / len(freq_list)
-                midi_pitch = freq_to_midi(avg_freq)
-            else:
-                midi_pitch = 60 # Default middle C if parsing fails
+            midi_pitch = get_midi_pitch(freq_list)
                 
             position_ms = int(start_time_sec * 1000)
             length_ms = int((end_time_sec - start_time_sec) * 1000)
@@ -200,18 +130,16 @@ def process_dali_to_ustx(output_dir=None, use_continuations=True, dali_id="006b5
                     next_start_time_sec = next_note['time'][0] - chunk_start_sec
                     length_ms = int((next_start_time_sec - start_time_sec) * 1000)
             
-            player.addNote(position_ms, length_ms, midi_pitch, text)
+            # Convert milliseconds to OpenUtau ticks (120BPM, 480 res = 0.96 multiplier)
+            position_ticks = max(0, int(position_ms * 0.96))
+            length_ticks = max(15, int(length_ms * 0.96))
+            
+            print(f"Adding note: text='{text}', pos={position_ticks}, len={length_ticks}, pitch={midi_pitch}")
+            player.addNote(position_ticks, length_ticks, midi_pitch, text)
             
             # --- Add pitch bends based on DALI F0 curve ---
             # Try to fetch true continuous F0 from npz, otherwise fallback to note info
-            continuous_f0 = []
-            if f0_matrix is not None and f0_freqs is not None and f0_time_r > 0:
-                col_start = int((start_time_sec + chunk_start_sec) / f0_time_r)
-                col_end = int((end_time_sec + chunk_start_sec) / f0_time_r)
-                if col_end > col_start:
-                    note_f0_slice = f0_matrix[:, col_start:col_end]
-                    peaks = np.argmax(note_f0_slice, axis=0)
-                    continuous_f0 = f0_freqs[peaks].tolist()
+            continuous_f0 = get_continuous_f0(f0_matrix, f0_freqs, f0_time_r, start_time_sec, end_time_sec, chunk_start_sec)
             
             if len(continuous_f0) > 1:
                 f0_points = continuous_f0
@@ -220,40 +148,7 @@ def process_dali_to_ustx(output_dir=None, use_continuations=True, dali_id="006b5
             else:
                 f0_points = []
             
-            if len(f0_points) > 1:
-                base_freq = 440.0 * (2.0 ** ((midi_pitch - 69) / 12.0))
-                # Note: F0 curve maps to the *original* duration of the note (before any extension in UTAU)
-                # OpenUtau positions curves by ticks. At 120BPM, 1ms is approximately 1 tick.
-                # However, for accuracy: BPM defaults to 120 (480 tpb) -> 960 ticks / sec -> 0.96 ticks / ms.
-                orig_length_ticks = (end_time_sec - start_time_sec) * 960.0
-                step_ticks = orig_length_ticks / len(f0_points)
-                start_tick = int(start_time_sec * 960.0)
-                
-                for i_f, f in enumerate(f0_points):
-                    if f > 0: # Only compute bend for valid frequencies
-                        cents = 1200.0 * math.log2(f / base_freq)
-                        cents = max(-1200.0, min(1200.0, cents))  # Bound between 1 octave
-                        pt_tick = int(round(start_tick + i_f * step_ticks))
-                        
-                        # Store in dense array at 5-tick resolution
-                        idx = int(pt_tick // 5)
-                        if idx >= len(pitch_array):
-                            # Extend array
-                            pitch_array.extend([0] * (idx - len(pitch_array) + 1))
-                        pitch_array[idx] = int(round(cents))
-                        
-                # Fill missing/zero values in the note interval with previous centroid by forward-filling
-                start_idx = int(start_tick // 5)
-                end_idx = int((start_tick + orig_length_ticks) // 5)
-                if end_idx >= len(pitch_array):
-                    pitch_array.extend([0] * (end_idx - len(pitch_array) + 1))
-                
-                last_val = 0
-                for i in range(start_idx, end_idx + 1):
-                    if pitch_array[i] != 0:
-                        last_val = pitch_array[i]
-                    else:
-                        pitch_array[i] = last_val
+            add_pitch_bends_to_array(pitch_array, f0_points, midi_pitch, start_time_sec, end_time_sec)
 
             notes_added += 1
 
@@ -263,18 +158,21 @@ def process_dali_to_ustx(output_dir=None, use_continuations=True, dali_id="006b5
             player.setPitchBend(arr, 5)
 
         if notes_added > 0:
-            # 6. Export to ustx
+            # 7. Add notes to API and synthesize waveform
+            print(f"Generating ustx sequences using mode: {mode}...")
             chunk_out_dir = os.path.join(output_dir, dali_id, chunk_name)
             os.makedirs(chunk_out_dir, exist_ok=True)
 
-
             #wav export
-            segment_wav = os.path.join(chunk_out_dir, "segment.wav")
+            segment_wav = os.path.join(chunk_out_dir, "prior.wav")
             os.makedirs(os.path.dirname(segment_wav), exist_ok=True)
             player.exportWav(segment_wav)
 
+            import time
+            time.sleep(1.0) # Hack to prevent OpenUtau C# thread race condition on Array.Clear()
+
             #ustx export
-            segment_ustx = os.path.join(chunk_out_dir, "segment.ustx")
+            segment_ustx = os.path.join(chunk_out_dir, "prior.ustx")
             os.makedirs(os.path.dirname(segment_ustx), exist_ok=True)
             player.exportUstx(segment_ustx)
 
@@ -301,6 +199,6 @@ def process_dali_to_ustx(output_dir=None, use_continuations=True, dali_id="006b5
     print(f"Finished generating {mode} ustx files.")
         
 if __name__ == "__main__":
-    process_dali_to_ustx(use_continuations=False, mode="test")
+    process_dali_to_ustx(use_continuations=False)
 
 #conda run -n data_synthesizer python synthesizePrior.py

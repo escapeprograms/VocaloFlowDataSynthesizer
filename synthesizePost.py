@@ -36,14 +36,9 @@ def parse_args():
     parser.add_argument("--no_continuations", action="store_true", help="Disable merging of syllable note continuations")
     return parser.parse_args()
 
-def freq_to_midi(freq):
-    """Convert frequency in Hz to closest MIDI note number (0-127)."""
-    if freq <= 0:
-        return 0
-    import math
-    return int(round(69 + 12 * math.log2(freq / 440.0)))
+from grab_midi import get_midi_pitch
 
-def process_dali_to_soulx(dali_id="006b5d1db6a447039c30443310b60c6f", language="English", output_dir=None, use_continuations=True, mode="paragraph", n_lines=4, use_f0=False):
+def process_dali_to_soulx(dali_id="006b5d1db6a447039c30443310b60c6f", language="English", output_dir=None, use_continuations=True, mode="paragraph", n_lines=4, use_f0=False, save_mel=False):
     if output_dir is None:
         output_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "Data"))
     
@@ -82,63 +77,8 @@ def process_dali_to_soulx(dali_id="006b5d1db6a447039c30443310b60c6f", language="
     try:
         from preprocess.tools.midi_parser import notes2meta, Note
         
-        # Group notes based on the selected mode
-        chunks = [] # each chunk is a list of note indices
-        chunk_start_times = []
-        chunk_names = []
-
-        if mode == "test":
-            for line_idx, line_info in enumerate(lines_annot):
-                line_notes = []
-                for idx, note_info in enumerate(notes_annot):
-                    if words_annot[note_info['index']]['index'] == line_idx:
-                        line_notes.append(idx)
-                if line_notes:
-                    chunks.append(line_notes)
-                    chunk_start_times.append(line_info['time'][0])
-                    chunk_names.append("line_test")
-                    break
-
-        elif mode == "paragraph":
-            for para_idx, para_info in enumerate(paragraphs_annot):
-                para_notes = []
-                for idx, note_info in enumerate(notes_annot):
-                    line_idx = words_annot[note_info['index']]['index']
-                    if lines_annot[line_idx]['index'] == para_idx:
-                        para_notes.append(idx)
-                if para_notes:
-                    chunks.append(para_notes)
-                    chunk_start_times.append(para_info['time'][0])
-                    chunk_names.append(f"paragraph_{para_idx}")
-
-        elif mode == "line":
-            for line_idx, line_info in enumerate(lines_annot):
-                line_notes = []
-                for idx, note_info in enumerate(notes_annot):
-                    if words_annot[note_info['index']]['index'] == line_idx:
-                        line_notes.append(idx)
-                if line_notes:
-                    chunks.append(line_notes)
-                    chunk_start_times.append(line_info['time'][0])
-                    chunk_names.append(f"line_{line_idx}")
-
-        elif mode == "n-line":
-            chunk_idx = 0
-            for para_idx, para_info in enumerate(paragraphs_annot):
-                para_lines = [line_idx for line_idx, line_info in enumerate(lines_annot) if line_info['index'] == para_idx]
-                
-                for i in range(0, len(para_lines), n_lines):
-                    group_lines = para_lines[i:i+n_lines]
-                    group_notes = []
-                    for idx, note_info in enumerate(notes_annot):
-                        if words_annot[note_info['index']]['index'] in group_lines:
-                            group_notes.append(idx)
-                    
-                    if group_notes:
-                        chunks.append(group_notes)
-                        chunk_start_times.append(lines_annot[group_lines[0]]['time'][0])
-                        chunk_names.append(f"chunk_{chunk_idx}")
-                        chunk_idx += 1
+        from determine_chunks import get_chunks
+        chunks, chunk_start_times, chunk_names = get_chunks(mode, notes_annot, words_annot, lines_annot, paragraphs_annot, n_lines=n_lines)
 
         for chunk_i, (note_indices, chunk_start_sec, chunk_name) in enumerate(zip(chunks, chunk_start_times, chunk_names)):
             
@@ -175,11 +115,7 @@ def process_dali_to_soulx(dali_id="006b5d1db6a447039c30443310b60c6f", language="
                 dur_s = end_time_sec - start_time_sec
                 
                 freq_list = note_info['freq']
-                if isinstance(freq_list, (list, tuple)) and len(freq_list) > 0:
-                    avg_freq = sum(freq_list) / len(freq_list)
-                    midi_pitch = freq_to_midi(avg_freq)
-                else:
-                    midi_pitch = 60
+                midi_pitch = get_midi_pitch(freq_list)
                     
                 if use_continuations and idx < len(notes_annot) - 1:
                     next_idx = idx + 1
@@ -259,6 +195,9 @@ def process_dali_to_soulx(dali_id="006b5d1db6a447039c30443310b60c6f", language="
                     "--pitch_shift", "0",
                     "--control", cmd_control
                 ]
+
+                if save_mel:
+                    cmd.append("--save_mel")
                 
                 env = os.environ.copy()
                 env["PYTHONPATH"] = SOULX_DIR + os.pathsep + env.get("PYTHONPATH", "")
