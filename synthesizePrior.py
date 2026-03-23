@@ -1,6 +1,7 @@
 import os
 import sys
 import math
+import re
 import pythonnet
 pythonnet.load("coreclr")
 import clr
@@ -37,7 +38,56 @@ from grab_midi import get_midi_pitch, freq_to_midi
 from grab_f0 import load_f0_data, get_continuous_f0, add_pitch_bends_to_array
 from determine_chunks import get_chunks
 
-def process_dali_to_ustx(output_dir=None, use_continuations=True, dali_id="006b5d1db6a447039c30443310b60c6f", mode="paragraph", n_lines=4, use_f0=False):
+# ---------------------------------------------------------------------------
+# G2P engine — initialized once at module load
+# ---------------------------------------------------------------------------
+try:
+    import g2p_en as _g2p_en_mod
+    _G2P = _g2p_en_mod.G2p()
+except Exception as _e:
+    _G2P = None
+    print(f"[WARNING] g2p_en not available: {_e}. use_phonemes will be disabled.")
+
+_ARPABET_VOWELS = {'aa', 'ax', 'ae', 'ah', 'ao', 'aw', 'ay', 'eh', 'er', 'ey',
+                   'ih', 'iy', 'ow', 'oy', 'uh', 'uw'}
+
+def _normalize_arpabet(raw_phonemes):
+    """Strip stress digits and lowercase: ['AH0','N','D'] -> ['ah','n','d']"""
+    return [re.sub(r'[0-9]', '', p).lower() for p in raw_phonemes]
+
+def _distribute_phonemes(phonemes, n_notes):
+    """
+    Coda-dominant syllabification: syllable i = phonemes[prev_end : next_vowel_pos].
+    Final syllable = phonemes[last_vowel_pos : end].
+    Returns a list of n_notes space-separated ARPAbet strings (may be empty for extras).
+    """
+    if not phonemes:
+        return [''] * n_notes
+
+    vowel_pos = [i for i, p in enumerate(phonemes) if p in _ARPABET_VOWELS]
+    if not vowel_pos:
+        # No vowels — put all consonants on first note, rest empty
+        return [' '.join(phonemes)] + [''] * (n_notes - 1)
+
+    syllables, prev = [], 0
+    for si in range(len(vowel_pos)):
+        end = vowel_pos[si + 1] if si < len(vowel_pos) - 1 else len(phonemes)
+        syllables.append(' '.join(phonemes[prev:end]))
+        prev = end
+
+    if len(syllables) > n_notes:
+        tail = ' '.join(p for s in syllables[n_notes - 1:] for p in s.split() if p)
+        syllables = syllables[:n_notes - 1] + [tail]
+    elif len(syllables) < n_notes:
+        syllables += [''] * (n_notes - len(syllables))
+
+    return syllables
+
+def _build_text_fallback(is_continuation, word_text):
+    """Intra-word legato is always applied: continuation notes get '+', first notes get the word text."""
+    return "+" if is_continuation else word_text
+
+def process_dali_to_ustx(output_dir=None, use_continuations=True, dali_id="006b5d1db6a447039c30443310b60c6f", mode="paragraph", n_lines=4, use_f0=False, use_phonemes=False):
     if output_dir is None:
         output_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "Data"))
     
@@ -84,16 +134,32 @@ def process_dali_to_ustx(output_dir=None, use_continuations=True, dali_id="006b5
     # Group notes based on the selected mode
     chunks, chunk_start_times, chunk_names = get_chunks(mode, notes_annot, words_annot, lines_annot, paragraphs_annot, n_lines=n_lines)
 
+    # 4. Initialize Player once to avoid shared dictionary collisions in OpenUtau G2P
+    player = Player("OpenUtau.Plugin.Builtin.ArpasingPlusPhonemizer")
+
     for chunk_i, (note_indices, chunk_start_sec, chunk_name) in enumerate(zip(chunks, chunk_start_times, chunk_names)):
-        
-        # 4. Initialize Player
-        player = Player("OpenUtau.Plugin.Builtin.ArpasingPlusPhonemizer")
+        # Clear any previous chunk notes
+        player.resetParts()
         
         # Keep track of dense pitch bends at 5-tick resolution
         # pitch_array[i] will store cents for the 5-tick chunk i.
         # Initialize an arbitrarily large array or resize later; let's use a dynamic list.
         pitch_array = []
         notes_added = 0
+
+        # Pre-compute per-word ARPAbet phonemes for this chunk (use_phonemes mode)
+        word_phoneme_cache = {}  # word_idx -> list[str] of normalized ARPAbet, or None on failure
+        word_hint_cache = {}     # word_idx -> list[str] of per-note hint strings
+        if use_phonemes and _G2P is not None:
+            chunk_word_indices = set(notes_annot[i]['index'] for i in note_indices)
+            for wid in chunk_word_indices:
+                wtext = words_annot[wid]['text']
+                try:
+                    word_phoneme_cache[wid] = _normalize_arpabet(_G2P(wtext))
+                except Exception as e:
+                    print(f"[WARNING] g2p_en failed for '{wtext}': {e}")
+                    word_phoneme_cache[wid] = None
+
         for idx in note_indices:
             note_info = notes_annot[idx]
             word_idx = note_info['index']
@@ -101,18 +167,35 @@ def process_dali_to_ustx(output_dir=None, use_continuations=True, dali_id="006b5
 
             word_text = word_info['text']
             
-            # Check if the previous note had the *same* word index. If so, it's a follow-up syllable
-            is_continuation = False
-            if use_continuations and idx > 0 and notes_annot[idx-1]['index'] == word_idx:
-                is_continuation = True
+            # Intra-word continuation is always applied (legato within a word is always better)
+            is_continuation = (idx > 0 and notes_annot[idx-1]['index'] == word_idx)
 
-            if use_continuations:
-                if is_continuation:
-                    text = "+"
+            if use_phonemes and _G2P is not None:
+                phonemes_for_word = word_phoneme_cache.get(word_idx)
+                if phonemes_for_word is not None:
+                    # Compute hint distribution once per word on first encounter
+                    if word_idx not in word_hint_cache:
+                        same_notes = [i for i in note_indices
+                                      if notes_annot[i]['index'] == word_idx]
+                        word_hint_cache[word_idx] = _distribute_phonemes(
+                            phonemes_for_word, len(same_notes)
+                        )
+                        word_hint_cache[f"{word_idx}_notes"] = same_notes
+                    same_notes = word_hint_cache[f"{word_idx}_notes"]
+                    pos_in_word = same_notes.index(idx) if idx in same_notes else 0
+                    hints = word_hint_cache[word_idx]
+                    hint = hints[pos_in_word] if pos_in_word < len(hints) else ''
+                    if hint:
+                        # Use the full word text with the ARPAbet hint
+                        text = f"{word_text}[{hint}]"
+                    else:
+                        # Phonemes were distributed to a prior note; use continuation
+                        text = "+"
                 else:
+                    # g2p cache miss: fall back to full word text (phonemizer handles it)
                     text = word_text
             else:
-                text = note_info['text']
+                text = _build_text_fallback(is_continuation, word_text)
                 
             start_time_sec = note_info['time'][0] - chunk_start_sec
             end_time_sec = note_info['time'][1] - chunk_start_sec
@@ -123,11 +206,13 @@ def process_dali_to_ustx(output_dir=None, use_continuations=True, dali_id="006b5
             position_ms = int(start_time_sec * 1000)
             length_ms = int((end_time_sec - start_time_sec) * 1000)
             
-            if use_continuations and idx < len(notes_annot) - 1:
+            if idx < len(notes_annot) - 1:
                 next_idx = idx + 1
                 next_note = notes_annot[next_idx]
-                if next_note['index'] == word_idx:
-                    next_start_time_sec = next_note['time'][0] - chunk_start_sec
+                next_start_time_sec = next_note['time'][0] - chunk_start_sec
+                # Always extend duration to reach the next note within the same word (intra-word legato)
+                # With use_continuations, also extend across word boundaries (full phrase legato)
+                if next_note['index'] == word_idx or use_continuations:
                     length_ms = int((next_start_time_sec - start_time_sec) * 1000)
             
             # Convert milliseconds to OpenUtau ticks (120BPM, 480 res = 0.96 multiplier)

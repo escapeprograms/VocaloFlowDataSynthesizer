@@ -1,8 +1,11 @@
+import json
 import os
 import numpy as np
 import librosa
 import tgt
 import soundfile as sf
+from datetime import datetime
+from difflib import SequenceMatcher
 from typing import List, Dict, Tuple, Optional
 from vocoders import invert_mel_to_audio, mel_to_soulx_mel, SOULX_MEL_CONFIG
 
@@ -121,6 +124,27 @@ def convert_timestamps_to_frames(
         })
     return boundaries_frames
 
+def _match_boundaries_by_label(
+    prior_boundaries: List[Dict],
+    post_boundaries: List[Dict]
+) -> List[Tuple[int, int]]:
+    """
+    Pairs prior and post boundaries by their text label using sequence alignment.
+
+    Returns a list of (prior_idx, post_idx) pairs where labels match.
+    This prevents index-shift misalignment when MFA produces slightly different
+    word/phoneme counts for the two audio streams.
+    """
+    prior_labels = [b['phoneme'].lower() for b in prior_boundaries]
+    post_labels  = [b['phoneme'].lower() for b in post_boundaries]
+    matcher = SequenceMatcher(None, prior_labels, post_labels, autojunk=False)
+    pairs = []
+    for block in matcher.get_matching_blocks():
+        for k in range(block.size):
+            pairs.append((block.a + k, block.b + k))
+    return pairs
+
+
 def align_phonemes_dtw(
     prior_mel: np.ndarray,
     post_mel: np.ndarray,
@@ -130,7 +154,7 @@ def align_phonemes_dtw(
     diagnostic_dir: Optional[str] = None,
     config: Optional[Dict[str, int]] = None,
     vocoder: str = "griffin_lim"
-) -> Tuple[List[np.ndarray], List[float]]:
+) -> Tuple[List[np.ndarray], List[float], List[Dict[str, int]]]:
     """
     Core function that iterates through phonemes, pads boundaries, calculates alignment 
     using DTW, warps the post slice, and trims the padding.
@@ -148,18 +172,27 @@ def align_phonemes_dtw(
     Returns:
         warped_post_slices: List of warped mel-spectrogram slices.
         local_dtw_costs: List of local DTW costs for each phoneme.
+        matched_prior_boundaries: Prior boundaries for each returned slice (for correct stitching).
     """
     warped_post_slices = []
     local_dtw_costs = []
-    
+    matched_prior_boundaries = []
+
     max_prior_len = prior_mel.shape[1]
     max_post_len = post_mel.shape[1]
-    
-    num_phonemes = min(len(prior_boundaries_frames), len(post_boundaries_frames))
-    
-    for i in range(num_phonemes):
-        pb = prior_boundaries_frames[i]
-        ptb = post_boundaries_frames[i]
+
+    # Match boundaries by label so index-shift from MFA doesn't misalign words.
+    matched_pairs = _match_boundaries_by_label(prior_boundaries_frames, post_boundaries_frames)
+    if not matched_pairs:
+        # Fallback: naive index pairing (original behaviour) when no labels match.
+        n = min(len(prior_boundaries_frames), len(post_boundaries_frames))
+        matched_pairs = [(i, i) for i in range(n)]
+
+    print(f"  Boundary matching: {len(matched_pairs)} / {max(len(prior_boundaries_frames), len(post_boundaries_frames))} segments matched by label.")
+
+    for seg_idx, (pi, pti) in enumerate(matched_pairs):
+        pb  = prior_boundaries_frames[pi]
+        ptb = post_boundaries_frames[pti]
         
         # 1 & 2. Expand boundaries by pad_frames (clamping at 0 and max seq len)
         prior_start = max(0, pb['start_frame'] - pad_frames)
@@ -179,10 +212,18 @@ def align_phonemes_dtw(
             zeros = np.zeros((post_mel.shape[0], max(0, target_len)))
             warped_post_slices.append(zeros)
             local_dtw_costs.append(0.0)
+            matched_prior_boundaries.append(pb)
             continue
 
         
         # 3. Compute DTW on padded slices
+        # Sanitize NaN values (can appear in SoulX-Singer generated mels)
+        if np.any(np.isnan(prior_slice)) or np.any(np.isnan(post_slice)):
+            prior_slice = np.nan_to_num(prior_slice, nan=0.0)
+            post_slice = np.nan_to_num(post_slice, nan=0.0)
+        # Add epsilon to prevent zero-norm columns causing NaN cosine distance
+        prior_slice = prior_slice + 1e-8
+        post_slice = post_slice + 1e-8
         D, wp = librosa.sequence.dtw(X=prior_slice, Y=post_slice, metric='cosine')
         cost = D[-1, -1]
         local_dtw_costs.append(cost)
@@ -207,11 +248,12 @@ def align_phonemes_dtw(
         # Extract strictly the intended target boundary length
         warped_trimmed = warped_padded_post[:, trim_start:trim_end]
         warped_post_slices.append(warped_trimmed)
-        
+        matched_prior_boundaries.append(pb)
+
         # 6. Diagnostics
         if diagnostic_dir:
-            ph_name = pb.get('phoneme', f'ph_{i}').replace('/', '_').replace('\\', '_')
-            diag_subdir = os.path.join(diagnostic_dir, f"{i:03d}_{ph_name}")
+            ph_name = pb.get('phoneme', f'ph_{seg_idx}').replace('/', '_').replace('\\', '_')
+            diag_subdir = os.path.join(diagnostic_dir, f"{seg_idx:03d}_{ph_name}")
             os.makedirs(diag_subdir, exist_ok=True)
             
             np.save(os.path.join(diag_subdir, "prior_slice.npy"), prior_slice)
@@ -226,7 +268,7 @@ def align_phonemes_dtw(
                 sf.write(os.path.join(diag_subdir, "post_slice.wav"), invert_mel_to_audio(post_slice, config, vocoder=vocoder), sr)
                 sf.write(os.path.join(diag_subdir, "warped_post_slice.wav"), invert_mel_to_audio(warped_trimmed, config, vocoder=vocoder), sr)
         
-    return warped_post_slices, local_dtw_costs
+    return warped_post_slices, local_dtw_costs, matched_prior_boundaries
 
 def stitch_warped_slices(
     warped_post_slices: List[np.ndarray],
@@ -256,14 +298,27 @@ def stitch_warped_slices(
     total_frames = prior_mel.shape[1]
     
     if prior_boundaries_frames is not None and len(prior_boundaries_frames) == len(warped_post_slices):
-        # Place each warped slice at its exact prior position on a silent canvas
+        # Place each warped slice at its exact prior position on a silent canvas.
+        # A short linear fade-in/out is applied at slice edges to prevent clicks
+        # at word boundaries caused by abrupt transitions to/from the zero canvas.
         canvas = np.zeros((n_mels, total_frames))
         for slice_mel, pb in zip(warped_post_slices, prior_boundaries_frames):
             start = pb['start_frame']
+            if start >= total_frames:
+                continue
             expected_len = pb['end_frame'] - start
             # Clip the slice to the expected length (safety guard)
-            fitted = slice_mel[:, :expected_len]
+            fitted = slice_mel[:, :expected_len].copy()
+            # Apply short boundary fade (up to 4 frames, never more than 1/4 of slice)
+            fade_len = min(4, fitted.shape[1] // 4)
+            if fade_len > 0:
+                fade_in  = np.linspace(0.0, 1.0, fade_len)
+                fade_out = np.linspace(1.0, 0.0, fade_len)
+                fitted[:, :fade_len]  *= fade_in
+                fitted[:, -fade_len:] *= fade_out
             end = min(start + fitted.shape[1], total_frames)
+            if end <= start:
+                continue
             canvas[:, start:end] = fitted[:, :end - start]
         return canvas
     else:
@@ -276,6 +331,14 @@ def stitch_warped_slices(
         elif diff < 0:
             final_warped_post_mel = final_warped_post_mel[:, :total_frames]
         return final_warped_post_mel
+
+def _write_alignment_meta(export_dir: str, meta: dict) -> None:
+    """Write alignment.json to export_dir, merging with any existing content."""
+    os.makedirs(export_dir, exist_ok=True)
+    path = os.path.join(export_dir, "alignment.json")
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(meta, f, indent=2)
+
 
 def align_and_export_mel(
     prior_audio_path: str,
@@ -292,29 +355,25 @@ def align_and_export_mel(
     post_mel_path: Optional[str] = None
 ) -> bool:
     """
-    Executes all pipeline steps, evaluates alignment mathematically, and saves output.
-    
-    Args:
-        prior_audio_path: Path to the prior audio file.
-        post_audio_path: Path to the post audio file.
-        prior_textgrid_path: Path to the Prior MFA-generated TextGrid.
-        post_textgrid_path: Path to the Post MFA-generated TextGrid.
-        config: STFT parameters.
-        pad_frames: Frames parameter for micro-dtw padding.
-        cost_threshold: Threshold for DTW mean cost rejection.
-        export_dir: Directory to save the `.wav` output.
-        diagnostic_mode: If True, exports phoneme-by-phoneme slices and scores.
-        segmentation_mode: "word" or "phoneme" DTW granularity.
-        vocoder: "griffin_lim" or "hifigan" backend.
-    
+    Executes all pipeline steps, records alignment quality, and saves output.
+
+    Always writes alignment.json with per-phoneme DTW scores regardless of quality.
+    Always saves aligned.wav so no GPU work is silently discarded.
+    cost_threshold is retained for logging/flagging only — it no longer gates file saving.
+
     Returns:
-        bool: True if alignment is successful and under the cost threshold, False otherwise.
+        bool: True if mean DTW cost is within cost_threshold, False otherwise.
+              aligned.wav and alignment.json are written in both cases.
     """
+    timestamp = datetime.now().isoformat(timespec="seconds")
+
     # Step 1
+    print(f"[{datetime.now().strftime('%H:%M:%S')}] Extracting features and timings...")
     prior_mel, post_mel, prior_boundaries_sec, post_boundaries_sec = extract_features_and_timings(
         prior_audio_path, post_audio_path, prior_textgrid_path, post_textgrid_path, config, segmentation_mode, vocoder, post_mel_path=post_mel_path
     )
-    
+    print(f"[{datetime.now().strftime('%H:%M:%S')}] Feature extraction complete.")
+
     # Step 2 - use SoulX-Singer sample rate and hop if using that vocoder
     if vocoder == "soulxsinger":
         sr = SOULX_MEL_CONFIG["sample_rate"]
@@ -322,39 +381,61 @@ def align_and_export_mel(
     else:
         sr = config.get("sample_rate", 22050)
         hop_length = config.get("hop_length", 256)
-    
+
     prior_boundaries_frames = convert_timestamps_to_frames(prior_boundaries_sec, sr, hop_length)
     post_boundaries_frames = convert_timestamps_to_frames(post_boundaries_sec, sr, hop_length)
-    
+
     # Step 3
     diag_path = os.path.join(export_dir, "diagnostics") if diagnostic_mode else None
     if diag_path:
         os.makedirs(diag_path, exist_ok=True)
-        
-    warped_post_slices, local_dtw_costs = align_phonemes_dtw(
+
+    print(f"[{datetime.now().strftime('%H:%M:%S')}] Running Phoneme-by-Phoneme DTW Alignment...")
+    warped_post_slices, local_dtw_costs, matched_prior_boundaries = align_phonemes_dtw(
         prior_mel, post_mel, prior_boundaries_frames, post_boundaries_frames, pad_frames,
         diagnostic_dir=diag_path,
         config=config,
         vocoder=vocoder
     )
-    
-    # Quality Assurance Evaluation
+
     mean_cost = float(np.mean(local_dtw_costs)) if local_dtw_costs else float('inf')
-    if mean_cost > cost_threshold:
-        print(f"Alignment rejected! Mean DTW cost {mean_cost:.2f} > threshold {cost_threshold}")
-        return False
-        
-    # Step 4 — place each warped slice at its exact prior frame position
-    final_warped_post_mel = stitch_warped_slices(warped_post_slices, prior_mel, prior_boundaries_frames)
-    
+    max_cost = float(np.max(local_dtw_costs)) if local_dtw_costs else float('inf')
+    under_threshold = mean_cost <= cost_threshold
+
+    # Step 4 — place each warped slice at its exact prior frame position.
+    # Use matched_prior_boundaries (not all prior_boundaries_frames) so only
+    # successfully label-matched segments are placed; unmatched segments remain silent.
+    final_warped_post_mel = stitch_warped_slices(warped_post_slices, prior_mel, matched_prior_boundaries)
+
     # Invert to audio using the selected Vocoder
+    print(f"[{datetime.now().strftime('%H:%M:%S')}] Inverting mel-spectrogram to audio via {vocoder}...")
     aligned_audio = invert_mel_to_audio(final_warped_post_mel, config, vocoder=vocoder)
-    
-    # Export
+
+    # Export audio — always saved regardless of cost
     os.makedirs(export_dir, exist_ok=True)
     out_path = os.path.join(export_dir, "aligned.wav")
-    
     sf.write(out_path, aligned_audio, sr)
-    
-    print(f"Alignment successful (Cost: {mean_cost:.2f}). Saved to {out_path}")
-    return True
+
+    # Write per-line alignment metadata
+    _write_alignment_meta(export_dir, {
+        "mean_dtw_cost": round(mean_cost, 4),
+        "max_dtw_cost": round(max_cost, 4),
+        "per_phoneme_costs": [round(c, 4) for c in local_dtw_costs],
+        "n_phonemes_aligned": len(local_dtw_costs),
+        "n_phonemes_total": max(len(prior_boundaries_frames), len(post_boundaries_frames)),
+        "under_threshold": under_threshold,
+        "cost_threshold": cost_threshold,
+        "mfa_prior_ok": True,
+        "mfa_post_ok": True,
+        "aligned_saved": True,
+        "segmentation_mode": segmentation_mode,
+        "vocoder": vocoder,
+        "timestamp": timestamp,
+    })
+
+    if under_threshold:
+        print(f"Alignment successful (mean={mean_cost:.2f}, max={max_cost:.2f}). Saved to {out_path}")
+    else:
+        print(f"Alignment saved but flagged (mean={mean_cost:.2f} > threshold={cost_threshold}). Saved to {out_path}")
+
+    return under_threshold

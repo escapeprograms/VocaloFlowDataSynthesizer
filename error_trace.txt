@@ -1,0 +1,36 @@
+[EXCEPTION DUMP] System.ArgumentNullException: Value cannot be null. (Parameter 'path1')
+   at System.ArgumentNullException.Throw(String paramName)
+RootPath WIPED
+OpenUtau is not installed, but we use the proper folder anyways: C:\Users\archi\Documents\OpenUtau
+backup search dir: C:\Users\archi\Documents\OpenUtau\assets\OpenUtau.Plugin.Builtin.dll
+Searching singers at C:\Users\archi\Documents\OpenUtau\Singers
+Found 1 singers
+Found Teto: 重音テト音声ライブラリー - 重音テト（かさねてと）音声ライブラリー
+[TRACE] PathManager.Inst.DataPath: C:\Users\archi\Documents\OpenUtau
+[TRACE] PathManager.Inst.PluginsPath: C:\Users\archi\Documents\OpenUtau\Plugins
+Track phonemizer: [EN ARPA+] Arpasing+ Phonemizer
+Number of Phrases: 0
+Render phrases count: 0
+Number of Phrases: 0
+Render phrases count: 0
+Number of Phrases: 0
+Render phrases count: 0
+Warning: Could not import MidiParser. Make sure dependencies (mido, librosa) are installed.
+Namespace(dali_id='006b5d1db6a447039c30443310b60c6f', language='English', output_dir='C:\\Users\\archi\\Documents\\Research\\Honors Thesis\\Data', use_continuations=False, mode='test', n_lines=4, use_f0=False)
+--- Running synthesizePrior (USTX Generation) for 006b5d1db6a447039c30443310b60c6f (mode=test) ---
+Loading DALI dataset entry from C:\Users\archi\Documents\Research\Honors Thesis\DALI\DALI_v2.0\annot_tismir\006b5d1db6a447039c30443310b60c6f.gz ...
+Successfully loaded song: Princes Of The Universe by Queen
+Annot are already in a vertical format
+Successfully loaded continuous f0 curves from C:\Users\archi\Documents\Research\Honors Thesis\DALI\f0_v2.0\f0_tismir\006b5d1db6a447039c30443310b60c6f.f0.npz
+Generating ustx sequences using mode: test...
+Adding note: text='here', pos=0, len=886, pitch=69
+Adding note: text='we', pos=1052, len=166, pitch=68
+Adding note: text='are', pos=1272, len=1106, pitch=68
+Generating ustx sequences using mode: test...
+Visualization generation failed: No module named 'matplotlib'
+Finished generating test ustx files.
+
+--- Running synthesizePost (SoulX-Singer Inference) for 006b5d1db6a447039c30443310b60c6f (mode=test) ---
+
+--- Synthesis Pipeline Complete ---
+

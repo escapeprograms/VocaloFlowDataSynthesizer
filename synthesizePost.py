@@ -38,7 +38,23 @@ def parse_args():
 
 from grab_midi import get_midi_pitch
 
-def process_dali_to_soulx(dali_id="006b5d1db6a447039c30443310b60c6f", language="English", output_dir=None, use_continuations=True, mode="paragraph", n_lines=4, use_f0=False, save_mel=False):
+
+def get_soulx_inference_config() -> dict:
+    """Return the SoulX-Singer model/config paths used by the batch inference subprocess.
+
+    Centralised here so both per-song (process_dali_to_soulx) and dataset-scale
+    (synthesize_dataset.py) callers read from a single source of truth.
+    """
+    return {
+        "model_path":          os.path.join(SOULX_DIR, "pretrained_models", "SoulX-Singer", "model.pt"),
+        "config_path":         os.path.join(SOULX_DIR, "soulxsinger", "config", "soulxsinger.yaml"),
+        "prompt_wav_path":     os.path.join(SOULX_DIR, "example", "transcriptions", "WillStetsonSample", "vocal.wav"),
+        "prompt_metadata_path":os.path.join(SOULX_DIR, "example", "transcriptions", "WillStetsonSample", "metadata.json"),
+        "phoneset_path":       os.path.join(SOULX_DIR, "soulxsinger", "utils", "phoneme", "phone_set.json"),
+    }
+
+
+def process_dali_to_soulx(dali_id="006b5d1db6a447039c30443310b60c6f", language="English", output_dir=None, use_continuations=True, mode="paragraph", n_lines=4, use_f0=False, save_mel=False, defer_inference=False):
     if output_dir is None:
         output_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "Data"))
     
@@ -80,6 +96,15 @@ def process_dali_to_soulx(dali_id="006b5d1db6a447039c30443310b60c6f", language="
         from determine_chunks import get_chunks
         chunks, chunk_start_times, chunk_names = get_chunks(mode, notes_annot, words_annot, lines_annot, paragraphs_annot, n_lines=n_lines)
 
+        infer_cfg = get_soulx_inference_config()
+        model_path           = infer_cfg["model_path"]
+        config_path          = infer_cfg["config_path"]
+        prompt_wav_path      = infer_cfg["prompt_wav_path"]
+        prompt_metadata_path = infer_cfg["prompt_metadata_path"]
+        phoneset_path        = infer_cfg["phoneset_path"]
+
+        inference_tasks = []
+
         for chunk_i, (note_indices, chunk_start_sec, chunk_name) in enumerate(zip(chunks, chunk_start_times, chunk_names)):
             
             # Setup output directory for this chunk
@@ -95,19 +120,14 @@ def process_dali_to_soulx(dali_id="006b5d1db6a447039c30443310b60c6f", language="
                     
                 word_text = word_info['text']
                 
-                is_continuation = False
-                if use_continuations and idx > 0 and notes_annot[idx-1]['index'] == word_idx:
-                    is_continuation = True
+                # Intra-word continuation is always applied
+                is_continuation = (idx > 0 and notes_annot[idx-1]['index'] == word_idx)
 
-                if use_continuations:
-                    if is_continuation:
-                        text = "-"
-                        note_type = 3
-                    else:
-                        text = word_text
-                        note_type = 2
+                if is_continuation:
+                    text = "-"
+                    note_type = 3
                 else:
-                    text = note_info['text']
+                    text = word_text
                     note_type = 2
                     
                 start_time_sec = note_info['time'][0] - chunk_start_sec
@@ -117,11 +137,12 @@ def process_dali_to_soulx(dali_id="006b5d1db6a447039c30443310b60c6f", language="
                 freq_list = note_info['freq']
                 midi_pitch = get_midi_pitch(freq_list)
                     
-                if use_continuations and idx < len(notes_annot) - 1:
+                if idx < len(notes_annot) - 1:
                     next_idx = idx + 1
                     next_note = notes_annot[next_idx]
-                    if next_note['index'] == word_idx:
-                        next_start_time_sec = next_note['time'][0] - chunk_start_sec
+                    next_start_time_sec = next_note['time'][0] - chunk_start_sec
+                    # Always extend within a word; with use_continuations also extend across word boundaries
+                    if next_note['index'] == word_idx or use_continuations:
                         dur_s = next_start_time_sec - start_time_sec
                         
                 soulx_notes.append(
@@ -169,44 +190,51 @@ def process_dali_to_soulx(dali_id="006b5d1db6a447039c30443310b60c6f", language="
                         use_f0 = False
                 
                 cmd_control = "melody" if use_f0 else "score"
-                
-                print(f"Running SoulX-Singer inference for {chunk_name}...")
-                
-                # Path setup for inference
-                model_path = os.path.join(SOULX_DIR, "pretrained_models", "SoulX-Singer", "model.pt")
-                config_path = os.path.join(SOULX_DIR, "soulxsinger", "config", "soulxsinger.yaml")
-                
-                # For zero-shot voice cloning, use the example prompt
-                prompt_wav_path = os.path.join(SOULX_DIR, "example", "transcriptions", "WillStetsonSample", "vocal.wav")
-                prompt_metadata_path = os.path.join(SOULX_DIR, "example", "transcriptions", "WillStetsonSample", "metadata.json")
-                phoneset_path = os.path.join(SOULX_DIR, "soulxsinger", "utils", "phoneme", "phone_set.json")
-                
-                cmd = [
-                    r"C:\Users\archi\miniconda3\envs\soulxsinger\python.exe", "-m", "cli.inference",
-                    "--device", "cuda",
-                    "--model_path", model_path,
-                    "--config", config_path,
-                    "--prompt_wav_path", prompt_wav_path,
-                    "--prompt_metadata_path", prompt_metadata_path,
-                    "--target_metadata_path", meta_path,
-                    "--phoneset_path", phoneset_path,
-                    "--save_dir", chunk_out_dir,
-                    "--auto_shift",
-                    "--pitch_shift", "0",
-                    "--control", cmd_control
-                ]
 
-                if save_mel:
-                    cmd.append("--save_mel")
-                
-                env = os.environ.copy()
-                env["PYTHONPATH"] = SOULX_DIR + os.pathsep + env.get("PYTHONPATH", "")
-                
-                try:
-                    subprocess.run(cmd, env=env, cwd=SOULX_DIR, check=True)
-                    print(f"Successfully generated wav for {chunk_name} in {chunk_out_dir}")
-                except subprocess.CalledProcessError as e:
-                    print(f"Inference failed for {chunk_name} with code {e.returncode}")
+                inference_tasks.append({
+                    "target_metadata_path": meta_path,
+                    "save_dir": chunk_out_dir,
+                    "control": cmd_control,
+                    "save_mel": save_mel,
+                })
+
+        # Either return tasks for the caller to batch (defer_inference=True),
+        # or launch the subprocess immediately for per-song use (defer_inference=False).
+        if defer_inference:
+            return inference_tasks
+
+        if inference_tasks:
+            import tempfile
+            print(f"\nRunning SoulX-Singer batch inference for {len(inference_tasks)} chunk(s) (model loaded once)...")
+            with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False, encoding='utf-8') as tf:
+                json.dump(inference_tasks, tf)
+                tasks_file = tf.name
+
+            batch_script = os.path.join(os.path.dirname(__file__), "soulxsinger_batch_infer.py")
+            cmd = [
+                r"C:\Users\archi\miniconda3\envs\soulxsinger\python.exe",
+                batch_script,
+                "--tasks_json", tasks_file,
+                "--model_path", model_path,
+                "--config", config_path,
+                "--prompt_wav_path", prompt_wav_path,
+                "--prompt_metadata_path", prompt_metadata_path,
+                "--phoneset_path", phoneset_path,
+                "--device", "cuda",
+                "--auto_shift",
+                "--pitch_shift", "0",
+            ]
+
+            env = os.environ.copy()
+            env["PYTHONPATH"] = SOULX_DIR + os.pathsep + env.get("PYTHONPATH", "")
+
+            try:
+                subprocess.run(cmd, env=env, cwd=SOULX_DIR, check=True)
+                print(f"Batch inference complete for {len(inference_tasks)} chunk(s).")
+            except subprocess.CalledProcessError as e:
+                print(f"Batch inference failed with code {e.returncode}")
+            finally:
+                os.unlink(tasks_file)
 
     except Exception as e:
         print(f"Error extracting metadata from DALI annotations: {e}")
