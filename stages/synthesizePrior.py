@@ -7,11 +7,14 @@ pythonnet.load("coreclr")
 import clr
 import numpy as np
 
+# Add DataSynthesizer root to path for cross-package imports
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+
 # Set up DALI import path
 try:
     import DALI as dali_code
 except ImportError:
-    dali_code_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "DALI", "code"))
+    dali_code_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "DALI", "code"))
     sys.path.append(dali_code_path)
     try:
         import DALI as dali_code
@@ -20,7 +23,7 @@ except ImportError:
         sys.exit(1)
 
 # Set up UtauGenerate import
-dependency_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "API", "UtauGenerate", "bin", "Debug", "net9.0", "UtauGenerate.dll")
+dependency_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "API", "UtauGenerate", "bin", "Debug", "net9.0", "UtauGenerate.dll")
 if not os.path.exists(dependency_dir):
     print(f"Error: Could not find UtauGenerate at {dependency_dir}")
     sys.exit(1)
@@ -34,9 +37,9 @@ clr.AddReference(dependency_dir)
 from UtauGenerate import Player
 import System
 
-from grab_midi import get_midi_pitch, freq_to_midi
-from grab_f0 import load_f0_data, get_continuous_f0, add_pitch_bends_to_array
-from determine_chunks import get_chunks
+from utils.grab_midi import get_midi_pitch, freq_to_midi
+from utils.grab_f0 import load_f0_data, get_continuous_f0, add_pitch_bends_to_array
+from utils.determine_chunks import get_chunks
 
 # ---------------------------------------------------------------------------
 # G2P engine — initialized once at module load
@@ -89,11 +92,11 @@ def _build_text_fallback(is_continuation, word_text):
 
 def process_dali_to_ustx(output_dir=None, use_continuations=True, dali_id="006b5d1db6a447039c30443310b60c6f", mode="paragraph", n_lines=4, use_f0=False, use_phonemes=False):
     if output_dir is None:
-        output_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "Data"))
+        output_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "Data"))
     
     os.makedirs(output_dir, exist_ok=True)
     # 1. Load the DALI dataset entry directly to bypass DALI library pathing bugs on Windows
-    dali_data_file = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "DALI", "DALI_v2.0", "annot_tismir", f"{dali_id}.gz"))
+    dali_data_file = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "DALI", "DALI_v2.0", "annot_tismir", f"{dali_id}.gz"))
     
     print(f"Loading DALI dataset entry from {dali_data_file} ...")
     try:
@@ -122,7 +125,7 @@ def process_dali_to_ustx(output_dir=None, use_continuations=True, dali_id="006b5
     paragraphs_annot = target_entry.annotations['annot'].get('paragraphs', [])
     
     # 3. Load continuous F0 curves from .f0.npz
-    dali_base_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "DALI"))
+    dali_base_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "DALI"))
     f0_matrix, f0_freqs, f0_time_r = load_f0_data(dali_id, dali_base_path)
         
     if not notes_annot or not words_annot or not lines_annot or not paragraphs_annot:
@@ -282,7 +285,136 @@ def process_dali_to_ustx(output_dir=None, use_continuations=True, dali_id="006b5
             # Note: We use the base API command since the Player python wrapper has issues with audio export
                 
     print(f"Finished generating {mode} ustx files.")
-        
+
+
+def generate_prior_from_notes(chunk_dir, extracted_notes_path, player, use_phonemes=True):
+    """Generate prior.wav and prior.ustx from ROSVOT-extracted notes.
+
+    This is the v2-pipeline counterpart of process_dali_to_ustx(). Instead of
+    reading DALI annotations directly, it consumes the extracted_notes.json
+    produced by note_extraction_batch.py (ROSVOT output with mapped lyrics).
+
+    Reuses the same OpenUtau tick conversion, phoneme distribution logic,
+    and Player API as the original function.  No F0 pitch bends are applied
+    (flat MIDI pitches from ROSVOT are used directly).
+
+    Args:
+        chunk_dir:            Directory containing extracted_notes.json; prior.wav
+                              and prior.ustx will be written here.
+        extracted_notes_path: Path to extracted_notes.json.
+        player:               Pre-initialised OpenUtau Player instance.
+        use_phonemes:         Use g2p_en ARPAbet phoneticHints per note.
+
+    Returns:
+        True if prior was generated, False otherwise.
+    """
+    import json
+    import time
+
+    with open(extracted_notes_path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+
+    notes = data.get("notes", [])
+    if not notes:
+        print(f"  No notes in {extracted_notes_path}, skipping prior generation.")
+        return False
+
+    player.resetParts()
+    notes_added = 0
+
+    # --- Pre-compute per-word ARPAbet phonemes ---
+    # Group notes by word: identify word boundaries via note_type
+    # (type 2 = first note of word, type 3 = continuation within word)
+    word_groups = []  # list of (word_text, [note_indices])
+    for i, note in enumerate(notes):
+        if note["note_type"] == 2:
+            word_groups.append((note["note_text"], [i]))
+        elif note["note_type"] == 3 and word_groups:
+            word_groups[-1][1].append(i)
+        else:
+            # Fallback: treat as new word
+            word_groups.append((note["note_text"], [i]))
+
+    word_phoneme_cache = {}   # word_group_idx -> list[str] normalised ARPAbet or None
+    word_hint_cache = {}      # word_group_idx -> list[str] per-note hint strings
+
+    if use_phonemes and _G2P is not None:
+        for wg_idx, (word_text, _indices) in enumerate(word_groups):
+            if not word_text or word_text == "-":
+                word_phoneme_cache[wg_idx] = None
+                continue
+            try:
+                word_phoneme_cache[wg_idx] = _normalize_arpabet(_G2P(word_text))
+            except Exception as e:
+                print(f"[WARNING] g2p_en failed for '{word_text}': {e}")
+                word_phoneme_cache[wg_idx] = None
+
+    # Build a reverse map: note_index -> (word_group_idx, position_within_word)
+    note_to_word = {}
+    for wg_idx, (word_text, indices) in enumerate(word_groups):
+        for pos, ni in enumerate(indices):
+            note_to_word[ni] = (wg_idx, pos)
+
+    # --- Add notes to Player ---
+    for i, note in enumerate(notes):
+        start_s = note["start_s"]
+        dur_s = note["note_dur"]
+        midi_pitch = note["note_pitch"]
+        note_type = note["note_type"]
+        word_text = note["note_text"]
+        is_continuation = (note_type == 3)
+
+        # Determine display text with phoneme hints
+        if use_phonemes and _G2P is not None and i in note_to_word:
+            wg_idx, pos_in_word = note_to_word[i]
+            wg_text, wg_indices = word_groups[wg_idx]
+            phonemes_for_word = word_phoneme_cache.get(wg_idx)
+
+            if phonemes_for_word is not None:
+                # Compute hint distribution once per word
+                if wg_idx not in word_hint_cache:
+                    word_hint_cache[wg_idx] = _distribute_phonemes(
+                        phonemes_for_word, len(wg_indices)
+                    )
+                hints = word_hint_cache[wg_idx]
+                hint = hints[pos_in_word] if pos_in_word < len(hints) else ''
+                if hint:
+                    text = f"{wg_text}[{hint}]"
+                else:
+                    text = "+"
+            else:
+                text = _build_text_fallback(is_continuation, word_text if not is_continuation else wg_text)
+        else:
+            text = _build_text_fallback(is_continuation, word_text)
+
+        position_ms = int(start_s * 1000)
+        length_ms = int(dur_s * 1000)
+
+        # Convert to OpenUtau ticks (120BPM, 480 res = 0.96 multiplier)
+        position_ticks = max(0, int(position_ms * 0.96))
+        length_ticks = max(15, int(length_ms * 0.96))
+
+        player.addNote(position_ticks, length_ticks, midi_pitch, text)
+        notes_added += 1
+
+    if notes_added == 0:
+        return False
+
+    # Export wav
+    segment_wav = os.path.join(chunk_dir, "prior.wav")
+    os.makedirs(chunk_dir, exist_ok=True)
+    player.exportWav(segment_wav)
+
+    time.sleep(1.0)  # Race-condition hack for OpenUtau C# thread on Array.Clear()
+
+    # Export ustx
+    segment_ustx = os.path.join(chunk_dir, "prior.ustx")
+    player.exportUstx(segment_ustx)
+
+    print(f"  Prior generated: {notes_added} notes -> {segment_wav}")
+    return True
+
+
 if __name__ == "__main__":
     process_dali_to_ustx(use_continuations=False)
 

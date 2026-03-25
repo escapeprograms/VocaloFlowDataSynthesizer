@@ -1,10 +1,14 @@
 import json
 import os
 import subprocess
+import sys
 import tempfile
 from datetime import datetime
 
-def _write_mfa_failure_meta(chunk_dir: str, prior_ok: bool, post_ok: bool) -> None:
+# Add DataSynthesizer root to path for cross-package imports
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+
+def _write_mfa_failure_meta(chunk_dir: str, prior_ok: bool, target_ok: bool) -> None:
     path = os.path.join(chunk_dir, "alignment.json")
     with open(path, "w", encoding="utf-8") as f:
         json.dump({
@@ -16,7 +20,7 @@ def _write_mfa_failure_meta(chunk_dir: str, prior_ok: bool, post_ok: bool) -> No
             "under_threshold": False,
             "cost_threshold": None,
             "mfa_prior_ok": prior_ok,
-            "mfa_post_ok": post_ok,
+            "mfa_target_ok": target_ok,
             "aligned_saved": False,
             "segmentation_mode": None,
             "vocoder": None,
@@ -57,12 +61,12 @@ def run_batch_mfa(tasks, label, conda_exe, mfa_script):
     return paths
 
 
-def run_dtw_alignment(dali_id, output_dir, mode, segmentation_mode, vocoder):
+def run_dtw_alignment(dali_id, output_dir, mode, segmentation_mode, vocoder, align_to="prior"):
     """Run segmented DTW time alignment for all chunks of a given DALI entry.
 
     Steps:
-        1. Discover chunks with prior.wav, generated.wav, and music.json.
-        2. Run batch MFA on prior and post audio.
+        1. Discover chunks with prior.wav, target.wav, and music.json.
+        2. Run batch MFA on prior and target audio.
         3. Run align_and_export_mel (segmented DTW) per chunk.
 
     Args:
@@ -71,11 +75,13 @@ def run_dtw_alignment(dali_id, output_dir, mode, segmentation_mode, vocoder):
         mode: Pipeline mode (e.g. 'line', 'paragraph', 'test'). 'test' enables diagnostic output.
         segmentation_mode: DTW segmentation granularity ('word' or 'phoneme').
         vocoder: Vocoder used for mel inversion ('griffin_lim', 'hifigan', 'soulxsinger').
+        align_to: "prior" (v1) warps post onto prior's timeline;
+                  "target" (v2) warps prior onto target's timeline.
     """
-    from segmented_dtw import align_and_export_mel
+    from alignment.segmented_dtw import align_and_export_mel
 
     conda_exe = r"C:\Users\archi\miniconda3\Scripts\conda.exe"
-    mfa_script = os.path.join(os.path.dirname(__file__), "mfa_align.py")
+    mfa_script = os.path.join(os.path.dirname(__file__), "..", "alignment", "mfa_align.py")
 
     dali_dir = os.path.join(output_dir, dali_id)
     if not os.path.exists(dali_dir):
@@ -84,7 +90,7 @@ def run_dtw_alignment(dali_id, output_dir, mode, segmentation_mode, vocoder):
 
     # 1. Collect chunks that have all required files
     prior_tasks = []
-    post_tasks = []
+    target_tasks = []
     chunks_to_process = []
 
     for chunk_name in os.listdir(dali_dir):
@@ -93,25 +99,25 @@ def run_dtw_alignment(dali_id, output_dir, mode, segmentation_mode, vocoder):
             continue
 
         prior_path = os.path.join(chunk_dir, "prior.wav")
-        post_path = os.path.join(chunk_dir, "generated.wav")
+        target_path = os.path.join(chunk_dir, "target.wav")
         music_json_path = os.path.join(chunk_dir, "music.json")
 
-        if os.path.exists(prior_path) and os.path.exists(post_path) and os.path.exists(music_json_path):
+        if os.path.exists(prior_path) and os.path.exists(target_path) and os.path.exists(music_json_path):
             with open(music_json_path, 'r', encoding='utf-8') as f:
                 meta_data = json.load(f)
             full_text = " ".join([m.get("text", "") for m in meta_data])
 
             prior_tasks.append((prior_path, full_text, chunk_dir))
-            post_tasks.append((post_path, full_text, chunk_dir))
+            target_tasks.append((target_path, full_text, chunk_dir))
             chunks_to_process.append(chunk_name)
 
     if not chunks_to_process:
         print("No chunks found to align.")
         return
 
-    # 2. Batch MFA for prior and post audio
+    # 2. Batch MFA for prior and target audio
     all_prior_textgrids = run_batch_mfa(prior_tasks, "Prior", conda_exe, mfa_script)
-    all_post_textgrids = run_batch_mfa(post_tasks, "Post", conda_exe, mfa_script)
+    all_target_textgrids = run_batch_mfa(target_tasks, "Target", conda_exe, mfa_script)
 
     # 3. Segmented DTW per chunk
     dtw_config = {
@@ -124,31 +130,31 @@ def run_dtw_alignment(dali_id, output_dir, mode, segmentation_mode, vocoder):
     for i, chunk_name in enumerate(chunks_to_process):
         chunk_dir = os.path.join(dali_dir, chunk_name)
         prior_path, _, _ = prior_tasks[i]
-        post_path, _, _ = post_tasks[i]
+        target_path, _, _ = target_tasks[i]
 
         prior_textgrid_path = all_prior_textgrids[i] if i < len(all_prior_textgrids) else None
-        post_textgrid_path = all_post_textgrids[i] if i < len(all_post_textgrids) else None
+        target_textgrid_path = all_target_textgrids[i] if i < len(all_target_textgrids) else None
 
-        if not prior_textgrid_path or not post_textgrid_path:
+        if not prior_textgrid_path or not target_textgrid_path:
             print(f"Warning: Missing TextGrids for {chunk_name}. Skipping DTW.")
             _write_mfa_failure_meta(
                 chunk_dir,
                 prior_ok=prior_textgrid_path is not None,
-                post_ok=post_textgrid_path is not None,
+                target_ok=target_textgrid_path is not None,
             )
             continue
 
         print(f"[{datetime.now().strftime('%H:%M:%S')}] Aligning {chunk_name} using Segmented DTW...")
         try:
-            post_mel_path = os.path.join(chunk_dir, "generated_mel.npy")
-            if not os.path.exists(post_mel_path):
-                post_mel_path = None
+            target_mel_path = os.path.join(chunk_dir, "target_mel.npy")
+            if not os.path.exists(target_mel_path):
+                target_mel_path = None
 
             success = align_and_export_mel(
                 prior_audio_path=prior_path,
-                post_audio_path=post_path,
+                target_audio_path=target_path,
                 prior_textgrid_path=prior_textgrid_path,
-                post_textgrid_path=post_textgrid_path,
+                target_textgrid_path=target_textgrid_path,
                 config=dtw_config,
                 pad_frames=4,
                 cost_threshold=100.0,
@@ -156,7 +162,8 @@ def run_dtw_alignment(dali_id, output_dir, mode, segmentation_mode, vocoder):
                 diagnostic_mode=(mode == 'test'),
                 segmentation_mode=segmentation_mode,
                 vocoder=vocoder,
-                post_mel_path=post_mel_path,
+                target_mel_path=target_mel_path,
+                align_to=align_to,
             )
 
             if success:

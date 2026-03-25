@@ -64,7 +64,7 @@ def main():
         chunk_name = os.path.basename(save_dir)
 
         # Resumability: skip chunks that already completed successfully
-        expected_output = os.path.join(save_dir, "generated_mel.npy" if save_mel else "generated.wav")
+        expected_output = os.path.join(save_dir, "target_mel.npy" if save_mel else "target.wav")
         if os.path.exists(expected_output):
             print(f"\n[{i+1}/{len(tasks)}] Skipping {chunk_name} (already done).")
             continue

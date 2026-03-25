@@ -203,7 +203,7 @@ def invert_mel_to_audio_soulxsinger(mel_spectrogram: np.ndarray, config: Dict[st
     try:
         import torch
         import sys
-        SOULX_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "SoulX-Singer"))
+        SOULX_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "SoulX-Singer"))
         if SOULX_DIR not in sys.path:
             sys.path.insert(0, SOULX_DIR)
         from soulxsinger.models.modules.vocoder import load_vocos_model
@@ -213,7 +213,7 @@ def invert_mel_to_audio_soulxsinger(mel_spectrogram: np.ndarray, config: Dict[st
     
     if _SOULX_VOCODER is None:
         ckpt_path = os.path.abspath(os.path.join(
-            os.path.dirname(__file__), "..", "SoulX-Singer", "pretrained_models", "SoulX-Singer", "model.pt"
+            os.path.dirname(__file__), "..", "..", "SoulX-Singer", "pretrained_models", "SoulX-Singer", "model.pt"
         ))
         if not os.path.exists(ckpt_path):
             raise FileNotFoundError(f"SoulX-Singer checkpoint not found at: {ckpt_path}")

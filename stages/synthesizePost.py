@@ -6,8 +6,11 @@ import argparse
 import re
 from pathlib import Path
 
+# Add DataSynthesizer root to path for cross-package imports
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+
 # Add SoulX-Singer to path to import its modules
-SOULX_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "SoulX-Singer"))
+SOULX_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "SoulX-Singer"))
 sys.path.append(SOULX_DIR)
 
 try:
@@ -20,7 +23,7 @@ except ImportError:
 try:
     import DALI as dali_code
 except ImportError:
-    dali_code_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "DALI", "code"))
+    dali_code_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "DALI", "code"))
     sys.path.append(dali_code_path)
     try:
         import DALI as dali_code
@@ -36,7 +39,7 @@ def parse_args():
     parser.add_argument("--no_continuations", action="store_true", help="Disable merging of syllable note continuations")
     return parser.parse_args()
 
-from grab_midi import get_midi_pitch
+from utils.grab_midi import get_midi_pitch
 
 
 def get_soulx_inference_config() -> dict:
@@ -56,10 +59,10 @@ def get_soulx_inference_config() -> dict:
 
 def process_dali_to_soulx(dali_id="006b5d1db6a447039c30443310b60c6f", language="English", output_dir=None, use_continuations=True, mode="paragraph", n_lines=4, use_f0=False, save_mel=False, defer_inference=False):
     if output_dir is None:
-        output_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "Data"))
-    
+        output_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "Data"))
+
     os.makedirs(output_dir, exist_ok=True)
-    dali_data_file = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "DALI", "DALI_v2.0", "annot_tismir", f"{dali_id}.gz"))
+    dali_data_file = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "DALI", "DALI_v2.0", "annot_tismir", f"{dali_id}.gz"))
     
     print(f"Loading DALI dataset entry from {dali_data_file} ...")
     try:
@@ -93,7 +96,7 @@ def process_dali_to_soulx(dali_id="006b5d1db6a447039c30443310b60c6f", language="
     try:
         from preprocess.tools.midi_parser import notes2meta, Note
         
-        from determine_chunks import get_chunks
+        from utils.determine_chunks import get_chunks
         chunks, chunk_start_times, chunk_names = get_chunks(mode, notes_annot, words_annot, lines_annot, paragraphs_annot, n_lines=n_lines)
 
         infer_cfg = get_soulx_inference_config()
@@ -210,7 +213,7 @@ def process_dali_to_soulx(dali_id="006b5d1db6a447039c30443310b60c6f", language="
                 json.dump(inference_tasks, tf)
                 tasks_file = tf.name
 
-            batch_script = os.path.join(os.path.dirname(__file__), "soulxsinger_batch_infer.py")
+            batch_script = os.path.join(os.path.dirname(__file__), "..", "batch", "soulxsinger_batch_infer.py")
             cmd = [
                 r"C:\Users\archi\miniconda3\envs\soulxsinger\python.exe",
                 batch_script,

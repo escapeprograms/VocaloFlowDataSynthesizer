@@ -28,22 +28,26 @@ import json
 import os
 import pickle
 import subprocess
+import sys
 import tempfile
 from datetime import datetime
 from typing import List, Optional
 
-from synthesizePrior import process_dali_to_ustx
-from synthesizePost import process_dali_to_soulx, get_soulx_inference_config
-from synthesizeDTW import run_dtw_alignment
+# Add DataSynthesizer root to path for cross-package imports
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+
+from stages.synthesizePrior import process_dali_to_ustx
+from stages.synthesizeTarget import process_dali_to_target, get_soulx_inference_config
+from stages.synthesizeDTW import run_dtw_alignment
 
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
 
 SOULX_PYTHON   = r"C:\Users\archi\miniconda3\envs\soulxsinger\python.exe"
-SOULX_DIR      = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "SoulX-Singer"))
-DALI_ANNOT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "DALI", "DALI_v2.0", "annot_tismir"))
-DEFAULT_OUTPUT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "Data"))
+SOULX_DIR      = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "SoulX-Singer"))
+DALI_ANNOT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "DALI", "DALI_v2.0", "annot_tismir"))
+DEFAULT_OUTPUT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "Data"))
 
 # File written at end of Phase 1 so Phase 2 can be re-run independently
 TASKS_CACHE_NAME = "pending_inference_tasks.json"
@@ -103,7 +107,7 @@ def run_phase1_annotation(
                 use_continuations=use_continuations,
                 use_phonemes=use_phonemes,
             )
-            tasks = process_dali_to_soulx(
+            tasks = process_dali_to_target(
                 dali_id=dali_id,
                 output_dir=output_dir,
                 mode=mode,
@@ -127,7 +131,7 @@ def run_phase1_annotation(
 
 def _launch_inference_subprocess(tasks: List[dict], infer_cfg: dict) -> None:
     """Write tasks to a temp JSON file and launch soulxsinger_batch_infer.py."""
-    batch_script = os.path.join(os.path.dirname(__file__), "soulxsinger_batch_infer.py")
+    batch_script = os.path.join(os.path.dirname(__file__), "..", "batch", "soulxsinger_batch_infer.py")
 
     with tempfile.NamedTemporaryFile(
         mode="w", suffix=".json", delete=False, encoding="utf-8"

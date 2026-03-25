@@ -6,11 +6,16 @@ This verifies HiFiGAN is working correctly before any DTW warping is applied.
 """
 
 import os
+import sys
 import numpy as np
 import librosa
 import soundfile as sf
 import torch
-from vocoders import invert_mel_to_audio_hifigan, invert_mel_to_audio_griffin_lim, mel_to_soulx_mel, invert_mel_to_audio_soulxsinger
+
+# Add DataSynthesizer root to path for cross-package imports
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+
+from utils.vocoders import invert_mel_to_audio_hifigan, invert_mel_to_audio_griffin_lim, mel_to_soulx_mel, invert_mel_to_audio_soulxsinger
 
 # --- Config (must match segmented_dtw.py settings) ---
 GENERATED_WAV = r"C:\Users\archi\Documents\Research\Honors Thesis\Data\006b5d1db6a447039c30443310b60c6f\line_test\generated.wav"
