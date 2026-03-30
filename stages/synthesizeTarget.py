@@ -116,6 +116,7 @@ def process_dali_to_target(dali_id="006b5d1db6a447039c30443310b60c6f", language=
             meta_path = os.path.join(chunk_out_dir, "music.json")
             
             soulx_notes = []
+            note_indices_set = set(note_indices)
             for idx in note_indices:
                 note_info = notes_annot[idx]
                 word_idx = note_info['index']
@@ -142,11 +143,13 @@ def process_dali_to_target(dali_id="006b5d1db6a447039c30443310b60c6f", language=
                     
                 if idx < len(notes_annot) - 1:
                     next_idx = idx + 1
-                    next_note = notes_annot[next_idx]
-                    next_start_time_sec = next_note['time'][0] - chunk_start_sec
-                    # Always extend within a word; with use_continuations also extend across word boundaries
-                    if next_note['index'] == word_idx or use_continuations:
-                        dur_s = next_start_time_sec - start_time_sec
+                    # Only extend duration if the next note is within this chunk
+                    if next_idx in note_indices_set:
+                        next_note = notes_annot[next_idx]
+                        next_start_time_sec = next_note['time'][0] - chunk_start_sec
+                        # Always extend within a word; with use_continuations also extend across word boundaries
+                        if next_note['index'] == word_idx or use_continuations:
+                            dur_s = next_start_time_sec - start_time_sec
                         
                 soulx_notes.append(
                     Note(

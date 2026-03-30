@@ -126,7 +126,8 @@ def _save_prior_mel(prior_path: str, chunk_dir: str, sr: int = 24000) -> None:
     """Extract and save the mel-spectrogram of the final prior.wav."""
     mel_path = os.path.join(chunk_dir, "prior_mel.npy")
     y_prior, _ = librosa.load(prior_path, sr=sr)
-    prior_mel = mel_to_soulx_mel(y_prior, sr=sr)
+    prior_mel = mel_to_soulx_mel(y_prior, sr=sr)  # (128, T)
+    prior_mel = prior_mel.T  # (T, 128) to match target_mel convention
     np.save(mel_path, prior_mel)
     print(f"    Prior mel saved to {mel_path} (shape {prior_mel.shape})")
 

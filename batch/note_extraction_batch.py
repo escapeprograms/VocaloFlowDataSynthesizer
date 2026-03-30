@@ -31,9 +31,14 @@ import traceback
 import numpy as np
 
 SOULX_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "SoulX-Singer"))
+DATASYNTHESIZER_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 sys.path.insert(0, SOULX_DIR)
+sys.path.insert(0, DATASYNTHESIZER_DIR)
 
 from preprocess.tools import F0Extractor
+from utils.voiced_unvoiced import (
+    get_voiced_mask, save_voicing, compute_note_voicing_stats,
+)
 
 
 def build_notes_from_music_json(music_json_path, f0_path, f0_sr=24000, f0_hop=480):
@@ -158,6 +163,12 @@ def main():
             # Extract F0 first (needed by build_notes_from_music_json)
             f0_extractor.process(audio_path, f0_path=f0_path, verbose=False)
             print(f"  F0 saved to {f0_path}")
+
+            # Save voiced/unvoiced mask alongside F0
+            f0_data = np.load(f0_path)
+            voicing_path = os.path.join(chunk_dir, "target_voicing.npy")
+            save_voicing(voicing_path, get_voiced_mask(f0_data))
+            print(f"  Voicing mask saved to {voicing_path}")
         except Exception as e:
             print(f"  F0 extraction failed for {item_name}: {e}")
             traceback.print_exc()
@@ -166,6 +177,13 @@ def main():
         try:
             # Build notes from music.json structure + F0 pitch
             extracted_notes = build_notes_from_music_json(music_json_path, f0_path)
+
+            # Enrich notes with per-note voicing statistics
+            f0_data = np.load(f0_path)
+            voicing_stats = compute_note_voicing_stats(f0_data, extracted_notes)
+            for note, stats in zip(extracted_notes, voicing_stats):
+                note["voiced_ratio"] = stats["voiced_ratio"]
+                note["mean_f0_hz"] = stats["mean_f0_hz"]
 
             with open(notes_path, "w", encoding="utf-8") as f:
                 json.dump({"notes": extracted_notes, "source": "music_json+f0"}, f, indent=2)

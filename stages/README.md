@@ -7,7 +7,7 @@ This directory contains the **core pipeline stages** — the major processing st
 Each file represents one major step in the synthesis pipeline:
 1. **Post synthesis** (`synthesizePost.py`): Generate vocals via SoulX-Singer.
 2. **Prior synthesis** (`synthesizePrior.py`): Generate vocals via OpenUtau API.
-3. **DTW orchestration** (`synthesizeDTW.py`): Coordinate MFA + segmented DTW alignment.
+3. **DTW orchestration** (`synthesizeDTW.py`, v1 only): Coordinate MFA + segmented DTW alignment.
 
 ## File Details
 
@@ -28,8 +28,8 @@ Generates vocal synthesis using the OpenUtau API.
 - **Optimized**: Reuses a single `Player` instance and calls `resetParts()` before adding notes for each chunk.
 - Imports: `utils.grab_midi`, `utils.grab_f0`, `utils.determine_chunks`.
 
-### `synthesizeDTW.py`
-Orchestrates MFA forced alignment and segmented DTW for all chunks of a DALI entry.
+### `synthesizeDTW.py` (v1 only)
+Orchestrates MFA forced alignment and segmented DTW for all chunks of a DALI entry. The v2 pipeline uses `alignment/iterative_align.py` directly instead.
 - `run_dtw_alignment(dali_id, output_dir, mode, segmentation_mode, vocoder, align_to)`: Main entry point.
   1. Discovers chunks with `prior.wav`, `generated.wav`, and `music.json`.
   2. Runs batch MFA on prior and post audio via `alignment/mfa_align.py` subprocess.

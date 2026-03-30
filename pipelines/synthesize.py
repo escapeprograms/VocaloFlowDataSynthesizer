@@ -1,3 +1,10 @@
+"""
+DEPRECATED — v1 single-song synthesis pipeline.
+
+Use synthesize_v2.py instead. This file is retained only for reproducing
+legacy v1 results. Do not add new features here.
+"""
+
 import argparse
 import os
 import sys

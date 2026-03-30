@@ -210,6 +210,7 @@ def synthesize_v2(
     print(f"\n[{ts()}] === Phase 4: Prior Generation + Iterative Alignment ===")
     from stages.synthesizePrior import Player
     from alignment.iterative_align import iterative_align
+    from utils.phoneme_mask import generate_phoneme_mask
 
     player = Player("OpenUtau.Plugin.Builtin.ArpasingPlusPhonemizer")
 
@@ -222,6 +223,10 @@ def synthesize_v2(
         if not os.path.exists(notes_path) or not os.path.exists(target_audio):
             continue
         if os.path.exists(alignment_path):
+            # Alignment done — but ensure phoneme mask exists (crash recovery)
+            phoneme_mask_path = os.path.join(chunk_dir, "phoneme_mask.npy")
+            if not os.path.exists(phoneme_mask_path):
+                generate_phoneme_mask(chunk_dir)
             print(f"  Skipping {chunk_name}: alignment.json exists")
             continue
 
@@ -258,6 +263,9 @@ def synthesize_v2(
         # Save alignment metrics
         with open(alignment_path, "w", encoding="utf-8") as f:
             json.dump(metrics, f, indent=2)
+
+        # Generate phoneme identity mask from adjusted notes + music.json
+        generate_phoneme_mask(chunk_dir)
 
     print(f"\n[{ts()}] === v2 Pipeline Complete ===")
 

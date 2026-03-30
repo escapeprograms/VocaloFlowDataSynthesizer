@@ -1,3 +1,11 @@
+"""
+Phoneme-level segmented DTW alignment (v1 ONLY).
+
+This module is used exclusively by the v1 pipeline (synthesize.py / synthesize_dataset.py).
+The v2 pipeline uses iterative_align.py instead, which adjusts note durations to achieve
+natural timing alignment without audio warping.
+"""
+
 import json
 import os
 import sys

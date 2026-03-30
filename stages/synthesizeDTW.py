@@ -1,3 +1,11 @@
+"""
+DTW alignment orchestration stage (v1 ONLY).
+
+Coordinates MFA forced alignment and segmented DTW for the v1 pipeline.
+The v2 pipeline uses alignment/iterative_align.py directly and does not
+require MFA or phoneme-level DTW.
+"""
+
 import json
 import os
 import subprocess
@@ -79,6 +87,7 @@ def run_dtw_alignment(dali_id, output_dir, mode, segmentation_mode, vocoder, ali
                   "target" (v2) warps prior onto target's timeline.
     """
     from alignment.segmented_dtw import align_and_export_mel
+    from utils.vocoders import SOULX_MEL_CONFIG
 
     conda_exe = r"C:\Users\archi\miniconda3\Scripts\conda.exe"
     mfa_script = os.path.join(os.path.dirname(__file__), "..", "alignment", "mfa_align.py")
@@ -121,10 +130,10 @@ def run_dtw_alignment(dali_id, output_dir, mode, segmentation_mode, vocoder, ali
 
     # 3. Segmented DTW per chunk
     dtw_config = {
-        "sample_rate": 22050,
-        "n_fft": 1024,
-        "hop_length": 256,
-        "n_mels": 80,
+        "sample_rate": SOULX_MEL_CONFIG["sample_rate"],   # 24000
+        "n_fft":       SOULX_MEL_CONFIG["n_fft"],          # 1920
+        "hop_length":  SOULX_MEL_CONFIG["hop_length"],     # 480
+        "n_mels":      SOULX_MEL_CONFIG["n_mels"],         # 128
     }
 
     for i, chunk_name in enumerate(chunks_to_process):

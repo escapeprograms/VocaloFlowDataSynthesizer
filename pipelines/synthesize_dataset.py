@@ -1,4 +1,10 @@
 """
+DEPRECATED — v1 dataset-scale synthesis pipeline.
+
+Use synthesize_dataset_v2.py instead. This file is retained only for
+reproducing legacy v1 results. Do not add new features here.
+
+Original description:
 Dataset-scale synthesis pipeline for all English DALI entries.
 
 Runs the three-phase pipeline that amortises the SoulX-Singer model load
