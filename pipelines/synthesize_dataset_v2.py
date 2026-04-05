@@ -24,8 +24,10 @@ Usage:
 """
 
 import argparse
+import gzip
 import json
 import os
+import pickle
 import subprocess
 import sys
 import tempfile
@@ -38,16 +40,77 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 from stages.synthesizeTarget import process_dali_to_target, get_soulx_inference_config
 from pipelines.synthesize_v2 import save_chunk_words
 
-# Import batch infrastructure from v1
-from pipelines.synthesize_dataset import (
-    get_english_dali_ids,
-    _launch_inference_subprocess,
-    SOULX_PYTHON,
-    SOULX_DIR,
-    DALI_ANNOT_DIR,
-    DEFAULT_OUTPUT,
-    TASKS_CACHE_NAME,
-)
+# ---------------------------------------------------------------------------
+# Constants
+# ---------------------------------------------------------------------------
+
+SOULX_PYTHON   = r"C:\Users\archi\miniconda3\envs\soulxsinger\python.exe"
+SOULX_DIR      = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "SoulX-Singer"))
+DALI_ANNOT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "DALI", "DALI_v2.0", "annot_tismir"))
+DEFAULT_OUTPUT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "Data"))
+
+# File written at end of Phase 1 so Phase 2 can be re-run independently
+TASKS_CACHE_NAME = "pending_inference_tasks.json"
+
+
+# ---------------------------------------------------------------------------
+# Dataset discovery
+# ---------------------------------------------------------------------------
+
+def get_english_dali_ids(dali_annot_dir: str) -> List[str]:
+    """Scan the DALI annotation directory and return IDs for all English songs."""
+    ids = []
+    for fname in sorted(os.listdir(dali_annot_dir)):
+        if not fname.endswith(".gz"):
+            continue
+        try:
+            with gzip.open(os.path.join(dali_annot_dir, fname), "rb") as fh:
+                obj = pickle.load(fh)
+            lang = obj.info.get("metadata", {}).get("language", "")
+            if lang.lower() == "english":
+                ids.append(fname.replace(".gz", ""))
+        except Exception:
+            pass  # Corrupt or unreadable entry — skip silently
+    return ids
+
+
+# ---------------------------------------------------------------------------
+# Inference subprocess launcher
+# ---------------------------------------------------------------------------
+
+def _launch_inference_subprocess(tasks: List[dict], infer_cfg: dict) -> None:
+    """Write tasks to a temp JSON file and launch soulxsinger_batch_infer.py."""
+    batch_script = os.path.join(os.path.dirname(__file__), "..", "batch", "soulxsinger_batch_infer.py")
+
+    with tempfile.NamedTemporaryFile(
+        mode="w", suffix=".json", delete=False, encoding="utf-8"
+    ) as tf:
+        json.dump(tasks, tf)
+        tasks_file = tf.name
+
+    cmd = [
+        SOULX_PYTHON, batch_script,
+        "--tasks_json",            tasks_file,
+        "--model_path",            infer_cfg["model_path"],
+        "--config",                infer_cfg["config_path"],
+        "--prompt_wav_path",       infer_cfg["prompt_wav_path"],
+        "--prompt_metadata_path",  infer_cfg["prompt_metadata_path"],
+        "--phoneset_path",         infer_cfg["phoneset_path"],
+        "--device",                "cuda",
+        "--auto_shift",
+        "--pitch_shift",           "0",
+    ]
+
+    env = os.environ.copy()
+    env["PYTHONPATH"] = SOULX_DIR + os.pathsep + env.get("PYTHONPATH", "")
+
+    try:
+        subprocess.run(cmd, env=env, cwd=SOULX_DIR, check=True)
+        print(f"  Batch complete ({len(tasks)} tasks).")
+    except subprocess.CalledProcessError as e:
+        print(f"  Batch FAILED with return code {e.returncode}.")
+    finally:
+        os.unlink(tasks_file)
 
 
 # ---------------------------------------------------------------------------
@@ -62,6 +125,7 @@ def run_phase1_target_metadata(
     use_f0: bool,
     use_continuations: bool,
     save_mel: bool,
+    provider: str = None,
 ) -> List[dict]:
     """Generate music.json + chunk_words.json for every song; collect inference tasks.
 
@@ -87,6 +151,7 @@ def run_phase1_target_metadata(
                 use_continuations=use_continuations,
                 save_mel=save_mel,
                 defer_inference=True,
+                provider=provider,
             )
             if tasks:
                 all_tasks.extend(tasks)
@@ -98,19 +163,19 @@ def run_phase1_target_metadata(
 
 
 # ---------------------------------------------------------------------------
-# Phase 2 — Inference (reuses v1 infrastructure)
+# Phase 2 — Inference
 # ---------------------------------------------------------------------------
 
-def run_phase2_inference(all_tasks: List[dict], songs_per_batch: int) -> None:
+def run_phase2_inference(all_tasks: List[dict], songs_per_batch: int, provider: str = None) -> None:
     """Split task list into song-sized batches and run one subprocess per batch.
 
-    Identical to v1 — the SoulX-Singer model is loaded once per subprocess.
+    The SoulX-Singer model is loaded once per subprocess.
     """
     if not all_tasks:
         print("[Phase 2] No tasks to run.")
         return
 
-    infer_cfg = get_soulx_inference_config()
+    infer_cfg = get_soulx_inference_config(provider)
 
     def dali_id_from_task(task: dict) -> str:
         return os.path.basename(os.path.dirname(task["save_dir"]))
@@ -257,6 +322,7 @@ def run_phase4_iterative_alignment(
     max_iterations: int = 3,
     duration_threshold: float = 0.15,
     player=None,
+    provider: str = None,
 ) -> None:
     """Generate prior and iteratively align it to target for all chunks.
 
@@ -330,6 +396,18 @@ def run_phase4_iterative_alignment(
                 with open(adjusted_path, "w", encoding="utf-8") as f:
                     json.dump({"notes": adjusted_notes, "source": "iterative"}, f, indent=2)
 
+                # Tag metrics with per-chunk voice provider info for traceability
+                prompt_info_path = os.path.join(chunk_dir, "prompt_info.json")
+                if os.path.exists(prompt_info_path):
+                    with open(prompt_info_path, "r", encoding="utf-8") as f:
+                        prompt_info = json.load(f)
+                    metrics["provider"] = prompt_info["provider"]
+                    metrics["prompt_name"] = prompt_info["prompt_name"]
+                else:
+                    # Legacy data without prompt_info.json
+                    metrics["provider"] = provider or "WillStetson"
+                    metrics["prompt_name"] = provider or "WillStetson"
+
                 with open(alignment_path, "w", encoding="utf-8") as f:
                     json.dump(metrics, f, indent=2)
 
@@ -372,11 +450,12 @@ def synthesize_dataset_v2(
     songs_per_batch: int = 100,
     phases: str = "12345",
     dali_ids: Optional[List[str]] = None,
+    provider: str = None,
 ) -> None:
     """Run the full target-first dataset synthesis pipeline.
 
     Args:
-        output_dir:           Root directory for all generated files.
+        output_dir:           Root Data directory (provider subdir is appended).
         dali_annot_dir:       Path to DALI annot_tismir directory.
         mode:                 Chunk granularity — 'line', 'n-line', 'paragraph', 'test'.
         n_lines:              Lines per chunk when mode='n-line'.
@@ -388,9 +467,16 @@ def synthesize_dataset_v2(
         songs_per_batch:      Songs grouped per subprocess call.
         phases:               Which phases to run, e.g. '12345', '34', '5'.
         dali_ids:             If given, process only these IDs; otherwise all English.
+        provider:             Voice provider name (default: WillStetson).
     """
-    inference_cache = os.path.join(output_dir, TASKS_CACHE_NAME)
-    os.makedirs(output_dir, exist_ok=True)
+    from voice_providers import DEFAULT_PROVIDER
+    if provider is None:
+        provider = DEFAULT_PROVIDER
+
+    # All data lives under Data/{provider}/
+    provider_dir = os.path.join(output_dir, provider)
+    inference_cache = os.path.join(provider_dir, TASKS_CACHE_NAME)
+    os.makedirs(provider_dir, exist_ok=True)
 
     # Resolve song list
     if dali_ids is None:
@@ -429,8 +515,9 @@ def synthesize_dataset_v2(
                 print(f"  PHASE 1 — Target Metadata  ({len(batch_ids)} songs)")
                 print(_sep)
                 batch_tasks = run_phase1_target_metadata(
-                    batch_ids, output_dir, mode, n_lines,
+                    batch_ids, provider_dir, mode, n_lines,
                     use_f0, use_continuations, save_mel=True,
+                    provider=provider,
                 )
                 # Merge into cumulative cache (replace entries for this batch's songs)
                 existing_cache: List[dict] = []
@@ -467,14 +554,14 @@ def synthesize_dataset_v2(
                         t for t in all_cached
                         if os.path.basename(os.path.dirname(t["save_dir"])) in batch_id_set
                     ]
-                run_phase2_inference(batch_tasks, songs_per_batch=songs_per_batch)
+                run_phase2_inference(batch_tasks, songs_per_batch=songs_per_batch, provider=provider)
 
             # ---- Phase 3 for this batch ----
             if "3" in phases:
                 print(f"\n{_sep}")
                 print(f"  PHASE 3 — Note Extraction + F0")
                 print(_sep)
-                extraction_tasks = collect_extraction_tasks(batch_ids, output_dir)
+                extraction_tasks = collect_extraction_tasks(batch_ids, provider_dir)
                 print(f"  {len(extraction_tasks)} extraction tasks collected.")
                 run_phase3_extraction(extraction_tasks, songs_per_batch=songs_per_batch)
 
@@ -484,11 +571,12 @@ def synthesize_dataset_v2(
                 print(f"  PHASE 4 — Iterative Alignment  ({len(batch_ids)} songs)")
                 print(_sep)
                 run_phase4_iterative_alignment(
-                    batch_ids, output_dir,
+                    batch_ids, provider_dir,
                     use_phonemes=use_phonemes,
                     max_iterations=max_iterations,
                     duration_threshold=duration_threshold,
                     player=player,
+                    provider=provider,
                 )
 
     # --- Phase 5 — once after all batches ---
@@ -496,7 +584,7 @@ def synthesize_dataset_v2(
         print(f"\n{_sep}")
         print(f"  PHASE 5 — Manifest Generation")
         print(_sep)
-        run_phase5_manifest(output_dir)
+        run_phase5_manifest(provider_dir)
 
     print(f"\n{_sep}")
     print(f"  v2 Dataset synthesis complete.")
@@ -530,6 +618,8 @@ if __name__ == "__main__":
                              "3=extraction, 4=iterative alignment, 5=manifest.")
     parser.add_argument("--dali_ids",            nargs="*", default=None,
                         help="Optional subset of DALI IDs to process.")
+    parser.add_argument("--provider",            default=None,
+                        help="Voice provider name (default: Rachie).")
 
     args = parser.parse_args()
     args.use_continuations = True
@@ -549,4 +639,5 @@ if __name__ == "__main__":
         songs_per_batch=args.songs_per_batch,
         phases=args.phases,
         dali_ids=args.dali_ids,
+        provider=args.provider,
     )

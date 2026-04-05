@@ -42,22 +42,31 @@ def parse_args():
 from utils.grab_midi import get_midi_pitch
 
 
-def get_soulx_inference_config() -> dict:
-    """Return the SoulX-Singer model/config paths used by the batch inference subprocess.
+def get_soulx_inference_config(provider: str = None) -> dict:
+    """Return the SoulX-Singer model/config/phoneset paths + default prompt paths.
 
     Centralised here so both per-song (process_dali_to_target) and dataset-scale
     (synthesize_dataset.py) callers read from a single source of truth.
+
+    The prompt_wav_path / prompt_metadata_path returned here are the provider's
+    *first* prompt — used as CLI-level defaults by soulxsinger_batch_infer.py.
+    Per-chunk prompt selection (for multi-prompt providers) overrides these via
+    task-dict fields; see utils/prompt_selection.py.
     """
+    from voice_providers import VOICE_PROVIDERS, DEFAULT_PROVIDER
+    if provider is None:
+        provider = DEFAULT_PROVIDER
+    first_prompt = VOICE_PROVIDERS[provider]["prompts"][0]
     return {
         "model_path":          os.path.join(SOULX_DIR, "pretrained_models", "SoulX-Singer", "model.pt"),
         "config_path":         os.path.join(SOULX_DIR, "soulxsinger", "config", "soulxsinger.yaml"),
-        "prompt_wav_path":     os.path.join(SOULX_DIR, "example", "transcriptions", "WillStetsonSample", "vocal.wav"),
-        "prompt_metadata_path":os.path.join(SOULX_DIR, "example", "transcriptions", "WillStetsonSample", "metadata.json"),
+        "prompt_wav_path":     first_prompt["prompt_wav_path"],
+        "prompt_metadata_path":first_prompt["prompt_metadata_path"],
         "phoneset_path":       os.path.join(SOULX_DIR, "soulxsinger", "utils", "phoneme", "phone_set.json"),
     }
 
 
-def process_dali_to_target(dali_id="006b5d1db6a447039c30443310b60c6f", language="English", output_dir=None, use_continuations=True, mode="paragraph", n_lines=4, use_f0=False, save_mel=False, defer_inference=False):
+def process_dali_to_target(dali_id="006b5d1db6a447039c30443310b60c6f", language="English", output_dir=None, use_continuations=True, mode="paragraph", n_lines=4, use_f0=False, save_mel=False, defer_inference=False, provider=None):
     if output_dir is None:
         output_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "Data"))
 
@@ -99,11 +108,13 @@ def process_dali_to_target(dali_id="006b5d1db6a447039c30443310b60c6f", language=
         from utils.determine_chunks import get_chunks
         chunks, chunk_start_times, chunk_names = get_chunks(mode, notes_annot, words_annot, lines_annot, paragraphs_annot, n_lines=n_lines)
 
-        infer_cfg = get_soulx_inference_config()
+        from utils.prompt_selection import select_prompt
+        from voice_providers import DEFAULT_PROVIDER
+
+        _provider = provider if provider is not None else DEFAULT_PROVIDER
+        infer_cfg = get_soulx_inference_config(_provider)
         model_path           = infer_cfg["model_path"]
         config_path          = infer_cfg["config_path"]
-        prompt_wav_path      = infer_cfg["prompt_wav_path"]
-        prompt_metadata_path = infer_cfg["prompt_metadata_path"]
         phoneset_path        = infer_cfg["phoneset_path"]
 
         inference_tasks = []
@@ -162,6 +173,18 @@ def process_dali_to_target(dali_id="006b5d1db6a447039c30443310b60c6f", language=
                 )
             
             if len(soulx_notes) > 0:
+                # Select voice prompt based on chunk's MIDI content
+                midi_pitches = [n.note_pitch for n in soulx_notes]
+                prompt = select_prompt(_provider, midi_pitches)
+
+                # Persist prompt selection for downstream phases
+                prompt_info_path = os.path.join(chunk_out_dir, "prompt_info.json")
+                with open(prompt_info_path, "w", encoding="utf-8") as f:
+                    json.dump({
+                        "provider": _provider,
+                        "prompt_name": prompt["prompt_name"],
+                    }, f, indent=2)
+
                 notes2meta(
                     soulx_notes,
                     meta_path,
@@ -169,7 +192,7 @@ def process_dali_to_target(dali_id="006b5d1db6a447039c30443310b60c6f", language=
                     language=language,
                     pitch_extractor=None
                 )
-                
+
                 if use_f0:
                     import numpy as np
                     with open(meta_path, "r", encoding="utf-8") as f:
@@ -202,6 +225,9 @@ def process_dali_to_target(dali_id="006b5d1db6a447039c30443310b60c6f", language=
                     "save_dir": chunk_out_dir,
                     "control": cmd_control,
                     "save_mel": save_mel,
+                    "prompt_wav_path": prompt["prompt_wav_path"],
+                    "prompt_metadata_path": prompt["prompt_metadata_path"],
+                    "prompt_name": prompt["prompt_name"],
                 })
 
         # Either return tasks for the caller to batch (defer_inference=True),
@@ -223,8 +249,8 @@ def process_dali_to_target(dali_id="006b5d1db6a447039c30443310b60c6f", language=
                 "--tasks_json", tasks_file,
                 "--model_path", model_path,
                 "--config", config_path,
-                "--prompt_wav_path", prompt_wav_path,
-                "--prompt_metadata_path", prompt_metadata_path,
+                "--prompt_wav_path", infer_cfg["prompt_wav_path"],
+                "--prompt_metadata_path", infer_cfg["prompt_metadata_path"],
                 "--phoneset_path", phoneset_path,
                 "--device", "cuda",
                 "--auto_shift",

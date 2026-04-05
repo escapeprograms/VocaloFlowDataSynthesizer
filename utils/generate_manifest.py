@@ -17,6 +17,8 @@ from typing import Optional
 
 
 MANIFEST_COLUMNS = [
+    "provider",
+    "prompt_name",
     "dali_id",
     "chunk_name",
     "prior_mel_path",
@@ -88,6 +90,8 @@ def generate_manifest(data_dir: str, manifest_path: Optional[str] = None) -> str
             # Use forward slashes for cross-platform path portability in CSV
             rel = f"{dali_id}/{chunk_name}"
             row = {
+                "provider": meta.get("provider", "WillStetson"),
+                "prompt_name": meta.get("prompt_name", "WillStetson"),
                 "dali_id": dali_id,
                 "chunk_name": chunk_name,
                 "prior_mel_path": f"{rel}/prior_mel.npy",

@@ -14,12 +14,6 @@ Vocoder integration for converting mel-spectrograms back to audio waveforms.
 - `invert_mel_to_audio_soulxsinger(mel, config)`: SoulX-Singer's built-in Vocos vocoder (best quality for SoulX mel-spectrograms).
 - Lazy-loads models on first call; caches globally.
 
-### `grab_f0.py`
-Handles fetching and interpreting fine-grained fundamental frequency (F0) tracking data.
-- `load_f0_data(dali_id, dali_base_path)`: Loads a continuous `.f0.npz` matrix for a DALI entry.
-- `get_continuous_f0(f0_matrix, f0_freqs, f0_time_r, start, end, notes)`: Slices the F0 data to extract the active pitch curve across specific chronological and note boundaries.
-- `add_pitch_bends_to_array(f0_curve, f0_time_r, notes, start_time)`: Translates raw frequency data arrays into a dense array of OpenUtau pitch bends (cents at 5-tick intervals).
-
 ### `grab_midi.py`
 Small helper for converting frequencies into MIDI notation.
 - `freq_to_midi(freq)`: Converts a raw Hz frequency into an integer MIDI note number.
@@ -32,7 +26,7 @@ Chunking utility for segmenting a song based on DALI annotations.
 - Returns `(chunks, chunk_start_times, chunk_names)`.
 
 ### `voiced_unvoiced.py`
-Voiced/unvoiced extraction utilities supplementing F0 extraction (v2 pipeline). All frame-level defaults match SoulX-Singer config (sr=24000, hop=480).
+Voiced/unvoiced extraction utilities supplementing F0 extraction. All frame-level defaults match SoulX-Singer config (sr=24000, hop=480).
 - `get_voiced_mask(f0)`: Core primitive — boolean mask from F0 array (F0 > 0 = voiced). Single source of truth for voicing definition.
 - `get_energy_mask(audio, sr, hop, threshold_db, frame_length)`: Boolean mask from RMS energy >= threshold. Uses librosa; hop-aligned to F0 grid.
 - `get_validated_voiced_mask(f0, audio, ...)`: AND of F0 mask + energy mask for robust voicing. Truncates to min length to handle frame count mismatches.
@@ -52,7 +46,14 @@ Generates frame-level phoneme identity mask for training, replicating SoulX-Sing
 
 ### `generate_manifest.py`
 Generates `manifest.csv` from iterative alignment results for ML training.
-- `generate_manifest(data_dir, manifest_path)`: Walks `Data/<dali_id>/<chunk_name>/` dirs, reads `alignment.json` (v2 iterative format only), writes CSV with columns: `dali_id`, `chunk_name`, `prior_mel_path`, `target_mel_path`, `f0_path`, `voicing_path`, `phoneme_mask_path`, `adjusted_notes_path`, `converged`, `iterations`, `dtw_cost`, `mean_deviation`, `max_deviation`.
+- `generate_manifest(data_dir, manifest_path)`: Walks `Data/{provider}/<dali_id>/<chunk_name>/` dirs, reads `alignment.json` (iterative format), writes CSV with columns: `provider`, `prompt_name`, `dali_id`, `chunk_name`, `prior_mel_path`, `target_mel_path`, `f0_path`, `voicing_path`, `phoneme_mask_path`, `adjusted_notes_path`, `converged`, `iterations`, `dtw_cost`, `mean_deviation`, `max_deviation`.
+- `provider` and `prompt_name` are read from `alignment.json` (defaults to `"WillStetson"` for legacy data).
 - Requires all training artifacts to exist before including a chunk in the manifest.
-- Standalone CLI: `python utils/generate_manifest.py --data_dir ../Data`
+- Standalone CLI: `python utils/generate_manifest.py --data_dir ../Data/WillStetson`
 - Uses `csv.DictWriter` (no pandas dependency). Idempotent — always overwrites.
+
+### `prompt_selection.py`
+Probabilistic voice prompt selection based on chunk MIDI content.
+- `select_prompt(provider, midi_pitches)`: For multi-prompt providers (e.g. Rachie), computes median MIDI of the chunk, measures distance to each register's `midi_range`, applies softmax, and samples. Single-prompt providers return their only prompt.
+- Returns dict with `prompt_name`, `prompt_wav_path`, `prompt_metadata_path`.
+- No external dependencies — uses only `math`, `random`, `statistics` stdlib modules.

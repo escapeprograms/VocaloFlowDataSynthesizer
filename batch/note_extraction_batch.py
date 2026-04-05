@@ -93,7 +93,7 @@ def build_notes_from_music_json(music_json_path, f0_path, f0_sr=24000, f0_hop=48
                 voiced = f0_slice[f0_slice > 0]
                 if len(voiced) > 0:
                     avg_hz = float(np.mean(voiced))
-                    midi_pitch = int(round(69 + 12 * math.log2(avg_hz / 440))) + 12
+                    midi_pitch = int(round(69 + 12 * math.log2(avg_hz / 440)))
                 else:
                     midi_pitch = fallback_pitch
             else:

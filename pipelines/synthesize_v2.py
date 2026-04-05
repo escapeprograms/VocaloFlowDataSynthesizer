@@ -114,10 +114,17 @@ def synthesize_v2(
     use_f0=False,
     use_continuations=True,
     use_phonemes=True,
+    provider=None,
 ):
+    from voice_providers import DEFAULT_PROVIDER
+    if provider is None:
+        provider = DEFAULT_PROVIDER
     if output_dir is None:
         output_dir = DEFAULT_OUTPUT
-    os.makedirs(output_dir, exist_ok=True)
+
+    # All data lives under Data/{provider}/
+    provider_dir = os.path.join(output_dir, provider)
+    os.makedirs(provider_dir, exist_ok=True)
 
     ts = lambda: datetime.now().strftime("%H:%M:%S")
 
@@ -125,7 +132,7 @@ def synthesize_v2(
     # Phase 1: Generate music.json + chunk_words.json from DALI
     # ------------------------------------------------------------------
     print(f"\n[{ts()}] === Phase 1: Target Metadata ===")
-    chunk_info = save_chunk_words(dali_id, output_dir, mode, n_lines)
+    chunk_info = save_chunk_words(dali_id, provider_dir, mode, n_lines)
     print(f"  Saved chunk_words.json for {len(chunk_info)} chunks.")
 
     # ------------------------------------------------------------------
@@ -134,13 +141,14 @@ def synthesize_v2(
     print(f"\n[{ts()}] === Phase 2: SoulX-Singer Inference ===")
     process_dali_to_target(
         dali_id=dali_id,
-        output_dir=output_dir,
+        output_dir=provider_dir,
         use_continuations=use_continuations,
         mode=mode,
         n_lines=n_lines,
         use_f0=use_f0,
         save_mel=True,
         defer_inference=False,  # run inline for single song
+        provider=provider,
     )
     print(f"[{ts()}] Target synthesis complete.")
 
@@ -260,7 +268,16 @@ def synthesize_v2(
         with open(adjusted_path, "w", encoding="utf-8") as f:
             json.dump({"notes": adjusted_notes, "source": "iterative"}, f, indent=2)
 
-        # Save alignment metrics
+        # Save alignment metrics with per-chunk provider tracking
+        prompt_info_path = os.path.join(chunk_dir, "prompt_info.json")
+        if os.path.exists(prompt_info_path):
+            with open(prompt_info_path, "r", encoding="utf-8") as f:
+                prompt_info = json.load(f)
+            metrics["provider"] = prompt_info["provider"]
+            metrics["prompt_name"] = prompt_info["prompt_name"]
+        else:
+            metrics["provider"] = provider
+            metrics["prompt_name"] = provider
         with open(alignment_path, "w", encoding="utf-8") as f:
             json.dump(metrics, f, indent=2)
 
@@ -285,6 +302,8 @@ if __name__ == "__main__":
     parser.add_argument("--use_f0", action="store_true")
     parser.add_argument("--use_continuations", action="store_true", default=True)
     parser.add_argument("--use_phonemes", action="store_true", default=True)
+    parser.add_argument("--provider", default=None,
+                        help="Voice provider name (default: WillStetson).")
 
     args = parser.parse_args()
     synthesize_v2(
@@ -295,4 +314,5 @@ if __name__ == "__main__":
         use_f0=args.use_f0,
         use_continuations=args.use_continuations,
         use_phonemes=args.use_phonemes,
+        provider=args.provider,
     )
