@@ -185,16 +185,55 @@ def generate_prior_from_notes(chunk_dir, extracted_notes_path, player, use_phone
     if notes_added == 0:
         return False
 
-    # Export wav
+    # Export wav + ustx under a single validate call
     segment_wav = os.path.join(chunk_dir, "prior.wav")
-    os.makedirs(chunk_dir, exist_ok=True)
-    player.exportWav(segment_wav)
-
-    time.sleep(1.0)  # Race-condition hack for OpenUtau C# thread on Array.Clear()
-
-    # Export ustx
     segment_ustx = os.path.join(chunk_dir, "prior.ustx")
-    player.exportUstx(segment_ustx)
+    os.makedirs(chunk_dir, exist_ok=True)
+    player.export(segment_wav, segment_ustx)
+
+    time.sleep(0.2)  # Race-condition buffer for OpenUtau C# thread on Array.Clear()
 
     print(f"  Prior generated: {notes_added} notes -> {segment_wav}")
+    return True
+
+
+def rerender_prior_with_adjusted_durations(chunk_dir, notes, player):
+    """Fast re-render: clear and re-add notes with updated durations, skip phonemizer.
+
+    Uses clearNotes() instead of resetParts() to preserve the part object and
+    its cached phonemizer state. Renders via exportFast() which skips phonemizer
+    re-setup. Must only be called after a full generate_prior_from_notes() has
+    already run for this chunk (so phonemizer state is cached).
+
+    Args:
+        chunk_dir:  Directory for this chunk; prior.wav/prior.ustx will be overwritten.
+        notes:      Note list with updated start_s / note_dur values.
+        player:     Pre-initialised OpenUtau Player with cached phonemizer state.
+
+    Returns:
+        True if prior was re-rendered, False otherwise.
+    """
+    import time
+
+    if not notes:
+        return False
+
+    player.clearNotes()
+    for note in notes:
+        position_ms = int(note["start_s"] * 1000)
+        length_ms = int(note["note_dur"] * 1000)
+        position_ticks = max(0, int(position_ms * 0.96))
+        length_ticks = max(15, int(length_ms * 0.96))
+        player.addNote(position_ticks, length_ticks, note["note_pitch"], note["note_text"])
+
+    segment_wav = os.path.join(chunk_dir, "prior.wav")
+    segment_ustx = os.path.join(chunk_dir, "prior.ustx")
+    for f in [segment_wav, segment_ustx]:
+        if os.path.exists(f):
+            os.remove(f)
+    player.exportFast(segment_wav, segment_ustx)
+
+    time.sleep(0.2)  # Race-condition buffer for OpenUtau C# thread
+
+    print(f"  Prior re-rendered (fast): {len(notes)} notes -> {segment_wav}")
     return True

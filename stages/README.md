@@ -21,8 +21,9 @@ Generates vocal synthesis using the SoulX-Singer model.
 
 ### `synthesizePrior.py`
 Generates vocal synthesis using the OpenUtau API.
-- `generate_prior_from_notes(chunk_dir, extracted_notes_path, player, use_phonemes)`: Reads `extracted_notes.json` (from ROSVOT), groups notes by word, applies g2p phoneme distribution (`_distribute_phonemes`), converts to OpenUtau ticks, exports `prior.wav` + `prior.ustx`.
+- `generate_prior_from_notes(chunk_dir, extracted_notes_path, player, use_phonemes)`: Reads `extracted_notes.json` (from ROSVOT), groups notes by word, applies g2p phoneme distribution (`_distribute_phonemes`), converts to OpenUtau ticks, exports `prior.wav` + `prior.ustx` via `player.export()` (single validate call for both outputs).
+- `rerender_prior_with_adjusted_durations(chunk_dir, notes, player)`: Fast re-render path for iterative alignment iterations 2+. Uses `player.clearNotes()` to preserve the part object (and phonemizer cache), re-adds notes with updated durations, then renders via `player.exportFast()` which uses lightweight validation (skips manual phonemizer setup). Produces both `prior.wav` and `prior.ustx`.
 - Uses `pythonnet` (`clr`) to interface with `UtauGenerate.dll` (a C# wrapper for OpenUtau).
-- **Optimized**: Reuses a single `Player` instance and calls `resetParts()` before adding notes for each chunk.
+- **Optimized**: Reuses a single `Player` instance. Sleep reduced to 0.2s (from 1.0s) as race-condition buffer.
 - G2P helpers: `_normalize_arpabet`, `_distribute_phonemes` (coda-dominant syllabification), `_build_text_fallback`.
 - Imports: `utils.grab_midi`.

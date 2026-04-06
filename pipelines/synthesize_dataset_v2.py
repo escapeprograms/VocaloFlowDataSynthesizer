@@ -451,6 +451,8 @@ def synthesize_dataset_v2(
     phases: str = "12345",
     dali_ids: Optional[List[str]] = None,
     provider: str = None,
+    start_index: int = 0,
+    end_index: Optional[int] = None,
 ) -> None:
     """Run the full target-first dataset synthesis pipeline.
 
@@ -483,6 +485,12 @@ def synthesize_dataset_v2(
         print(f"[{datetime.now().strftime('%H:%M:%S')}] Scanning for English DALI entries...")
         dali_ids = get_english_dali_ids(dali_annot_dir)
         print(f"Found {len(dali_ids)} English entries.")
+
+    # Apply index slice for multi-machine partitioning
+    total_before_slice = len(dali_ids)
+    dali_ids = dali_ids[start_index:end_index]
+    print(f"Processing songs[{start_index}:{end_index}] — "
+          f"{len(dali_ids)} of {total_before_slice} songs")
 
     _sep = "=" * 62
     _batch_sep = "#" * 62
@@ -620,6 +628,10 @@ if __name__ == "__main__":
                         help="Optional subset of DALI IDs to process.")
     parser.add_argument("--provider",            default=None,
                         help="Voice provider name (default: Rachie).")
+    parser.add_argument("--start_index",         type=int, default=0,
+                        help="First song index, inclusive (default: 0).")
+    parser.add_argument("--end_index",           type=int, default=None,
+                        help="Last song index, exclusive (default: end of list).")
 
     args = parser.parse_args()
     args.use_continuations = True
@@ -640,4 +652,6 @@ if __name__ == "__main__":
         phases=args.phases,
         dali_ids=args.dali_ids,
         provider=args.provider,
+        start_index=args.start_index,
+        end_index=args.end_index,
     )

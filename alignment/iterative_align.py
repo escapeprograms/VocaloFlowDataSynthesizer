@@ -45,8 +45,14 @@ def _compute_dtw_warp_path(
     prior_audio_path: str,
     target_audio_path: str,
     sr: int = 24000,
+    cached_target_mel: Optional[np.ndarray] = None,
 ) -> Tuple[np.ndarray, np.ndarray, float, int]:
     """Compute DTW between prior and target mel-spectrograms.
+
+    Args:
+        cached_target_mel: Pre-computed target mel (n_mels, T_target), already
+            sanitised.  When provided, ``target_audio_path`` is not loaded,
+            saving ~0.1-0.2 s per call.
 
     Returns:
         prior_mel: (n_mels, T_prior)
@@ -55,14 +61,15 @@ def _compute_dtw_warp_path(
         hop_length: Hop length used for frame↔sample conversion.
     """
     y_prior, _ = librosa.load(prior_audio_path, sr=sr)
-    y_target, _ = librosa.load(target_audio_path, sr=sr)
-
     prior_mel = mel_to_soulx_mel(y_prior, sr=sr)
-    target_mel = mel_to_soulx_mel(y_target, sr=sr)
-
-    # Sanitise
     prior_mel = np.nan_to_num(prior_mel, nan=0.0) + 1e-8
-    target_mel = np.nan_to_num(target_mel, nan=0.0) + 1e-8
+
+    if cached_target_mel is not None:
+        target_mel = cached_target_mel
+    else:
+        y_target, _ = librosa.load(target_audio_path, sr=sr)
+        target_mel = mel_to_soulx_mel(y_target, sr=sr)
+        target_mel = np.nan_to_num(target_mel, nan=0.0) + 1e-8
 
     D, wp = librosa.sequence.dtw(X=prior_mel, Y=target_mel, metric="cosine")
     cost = float(D[-1, -1])
@@ -213,7 +220,7 @@ def iterative_align(
         adjusted_notes:  Note list with corrected durations/start times.
         metrics_dict:    Final alignment metrics.
     """
-    from stages.synthesizePrior import generate_prior_from_notes
+    from stages.synthesizePrior import generate_prior_from_notes, rerender_prior_with_adjusted_durations
 
     ts = lambda: datetime.now().strftime("%H:%M:%S")
 
@@ -222,27 +229,41 @@ def iterative_align(
     best_max_deviation = float("inf")
     best_cost = float("inf")
 
+    # Pre-compute target mel once (it never changes across iterations)
+    y_target, _ = librosa.load(target_audio_path, sr=sr)
+    cached_target_mel = mel_to_soulx_mel(y_target, sr=sr)
+    cached_target_mel = np.nan_to_num(cached_target_mel, nan=0.0) + 1e-8
+
     for iteration in range(max_iterations):
         print(f"  [{ts()}] Iteration {iteration + 1}/{max_iterations}")
 
-        # 1. Write current notes and generate prior
-        iter_notes_path = os.path.join(chunk_dir, "iter_notes.json")
-        with open(iter_notes_path, "w", encoding="utf-8") as f:
-            json.dump({"notes": current_notes, "source": "iterative"}, f, indent=2)
-
+        # 1. Generate prior from current notes
         prior_path = os.path.join(chunk_dir, "prior.wav")
-        for cleanup in [prior_path, os.path.join(chunk_dir, "prior.ustx")]:
-            if os.path.exists(cleanup):
-                os.remove(cleanup)
 
-        ok = generate_prior_from_notes(chunk_dir, iter_notes_path, player, use_phonemes=use_phonemes)
+        if iteration == 0:
+            # First iteration: full path (phonemizer setup + note creation)
+            iter_notes_path = os.path.join(chunk_dir, "iter_notes.json")
+            with open(iter_notes_path, "w", encoding="utf-8") as f:
+                json.dump({"notes": current_notes, "source": "iterative"}, f, indent=2)
+
+            for cleanup in [prior_path, os.path.join(chunk_dir, "prior.ustx")]:
+                if os.path.exists(cleanup):
+                    os.remove(cleanup)
+
+            ok = generate_prior_from_notes(chunk_dir, iter_notes_path, player,
+                                            use_phonemes=use_phonemes)
+        else:
+            # Iterations 2+: fast path (update durations only, skip phonemizer)
+            ok = rerender_prior_with_adjusted_durations(chunk_dir, current_notes, player)
+
         if not ok:
             print(f"    Prior generation failed.")
             break
 
         # 2. DTW between prior and target
         prior_mel, warp_path, dtw_cost, hop_length = _compute_dtw_warp_path(
-            prior_path, target_audio_path, sr=sr
+            prior_path, target_audio_path, sr=sr,
+            cached_target_mel=cached_target_mel,
         )
 
         # 3. Compute per-note ratios from warp path
