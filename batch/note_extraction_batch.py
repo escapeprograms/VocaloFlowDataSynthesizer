@@ -23,7 +23,6 @@ tasks.json is a list of dicts, each with keys:
 
 import argparse
 import json
-import math
 import os
 import sys
 import traceback
@@ -36,23 +35,19 @@ sys.path.insert(0, SOULX_DIR)
 sys.path.insert(0, DATASYNTHESIZER_DIR)
 
 from preprocess.tools import F0Extractor
-from utils.voiced_unvoiced import (
-    get_voiced_mask, save_voicing, compute_note_voicing_stats,
-)
+from utils.grab_midi import recompute_note_pitches
+from utils.voiced_unvoiced import get_voiced_mask, save_voicing
 
 
-def build_notes_from_music_json(music_json_path, f0_path, f0_sr=24000, f0_hop=480):
-    """Build extracted_notes from music.json structure + target_f0 pitch.
+def build_notes_from_music_json(music_json_path):
+    """Build extracted_notes from music.json structure.
 
     Parses music.json's space-separated fields to get per-note duration, text,
-    and type.  Loads target_f0.npy and computes the average voiced F0 per note,
-    rounding to the nearest MIDI note number.
+    type, and fallback pitch.  Pitch is set to the fallback value from
+    music.json; call recompute_note_pitches() afterward to refine from F0.
 
     Args:
         music_json_path: Path to the SoulX-Singer music.json metadata.
-        f0_path: Path to target_f0.npy (frame-level F0 in Hz from RMVPE).
-        f0_sr: Sample rate used by the F0 extractor (default 24000).
-        f0_hop: Hop size used by the F0 extractor (default 480).
 
     Returns:
         List of note dicts in extracted_notes format.
@@ -62,10 +57,6 @@ def build_notes_from_music_json(music_json_path, f0_path, f0_sr=24000, f0_hop=48
 
     if not meta_list:
         return []
-
-    # Load F0
-    f0 = np.load(f0_path) if os.path.exists(f0_path) else np.array([])
-    hop_s = f0_hop / f0_sr  # seconds per frame
 
     notes = []
     for segment in meta_list:
@@ -85,20 +76,6 @@ def build_notes_from_music_json(music_json_path, f0_path, f0_sr=24000, f0_hop=48
             note_type = types[i]
             fallback_pitch = fallback_pitches[i] if i < len(fallback_pitches) else 60
 
-            # Map note time range to F0 frames and compute average pitch
-            start_frame = int(abs_start / hop_s)
-            end_frame = int((abs_start + dur) / hop_s)
-            if len(f0) > 0 and start_frame < len(f0):
-                f0_slice = f0[start_frame:min(end_frame, len(f0))]
-                voiced = f0_slice[f0_slice > 0]
-                if len(voiced) > 0:
-                    avg_hz = float(np.mean(voiced))
-                    midi_pitch = int(round(69 + 12 * math.log2(avg_hz / 440)))
-                else:
-                    midi_pitch = fallback_pitch
-            else:
-                midi_pitch = fallback_pitch
-
             # For continuation notes, use "-" (matching synthesizePrior convention)
             if note_type == 3:
                 note_text = "-"
@@ -107,7 +84,7 @@ def build_notes_from_music_json(music_json_path, f0_path, f0_sr=24000, f0_hop=48
                 "start_s": round(abs_start, 6),
                 "note_dur": round(dur, 6),
                 "note_text": note_text,
-                "note_pitch": midi_pitch,
+                "note_pitch": fallback_pitch,
                 "note_type": note_type,
             })
 
@@ -175,15 +152,10 @@ def main():
             continue
 
         try:
-            # Build notes from music.json structure + F0 pitch
-            extracted_notes = build_notes_from_music_json(music_json_path, f0_path)
-
-            # Enrich notes with per-note voicing statistics
+            # Build notes from music.json structure, then refine pitch from F0
+            extracted_notes = build_notes_from_music_json(music_json_path)
             f0_data = np.load(f0_path)
-            voicing_stats = compute_note_voicing_stats(f0_data, extracted_notes)
-            for note, stats in zip(extracted_notes, voicing_stats):
-                note["voiced_ratio"] = stats["voiced_ratio"]
-                note["mean_f0_hz"] = stats["mean_f0_hz"]
+            recompute_note_pitches(extracted_notes, f0_data)
 
             with open(notes_path, "w", encoding="utf-8") as f:
                 json.dump({"notes": extracted_notes, "source": "music_json+f0"}, f, indent=2)

@@ -8,8 +8,10 @@ import clr
 # Add DataSynthesizer root to path for cross-package imports
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
+from config import UTAU_GENERATE_DLL
+
 # Set up UtauGenerate import
-dependency_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "API", "UtauGenerate", "bin", "Debug", "net9.0", "UtauGenerate.dll")
+dependency_dir = UTAU_GENERATE_DLL
 if not os.path.exists(dependency_dir):
     print(f"Error: Could not find UtauGenerate at {dependency_dir}")
     sys.exit(1)

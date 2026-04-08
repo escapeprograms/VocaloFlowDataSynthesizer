@@ -34,6 +34,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 
 import librosa
 import numpy as np
+from utils.grab_midi import recompute_note_pitches
 from utils.vocoders import mel_to_soulx_mel, SOULX_MEL_CONFIG
 
 
@@ -234,6 +235,10 @@ def iterative_align(
     cached_target_mel = mel_to_soulx_mel(y_target, sr=sr)
     cached_target_mel = np.nan_to_num(cached_target_mel, nan=0.0) + 1e-8
 
+    # Pre-load target F0 for pitch recalculation after duration adjustments
+    f0_path = os.path.join(chunk_dir, "target_f0.npy")
+    target_f0 = np.load(f0_path) if os.path.exists(f0_path) else None
+
     for iteration in range(max_iterations):
         print(f"  [{ts()}] Iteration {iteration + 1}/{max_iterations}")
 
@@ -305,6 +310,10 @@ def iterative_align(
 
         # 5. Adjust note durations for next iteration
         current_notes = _adjust_note_durations(current_notes, per_note, damping=damping)
+
+        # 6. Recalculate pitches for the new time windows
+        if target_f0 is not None:
+            recompute_note_pitches(current_notes, target_f0, sr=sr)
 
     # Did not fully converge — regenerate from best notes
     print(f"    Max iterations reached. Best max deviation: {best_max_deviation:.1%}, "

@@ -16,7 +16,7 @@ Single-song driver — runs the target-first pipeline for one DALI entry.
 - **Four-phase pipeline** (all in one script, subprocesses for GPU phases):
   - **Phase 1**: Generate `music.json` + `chunk_words.json` from DALI annotations.
   - **Phase 2**: SoulX-Singer inference (subprocess in `soulxsinger` env).
-  - **Phase 3**: ROSVOT note extraction + F0 (subprocess via `batch/note_extraction_batch.py`).
+  - **Phase 3**: `music.json` note extraction + F0 (subprocess via `batch/note_extraction_batch.py`).
   - **Phase 4**: Prior generation from extracted notes via OpenUtau + iterative alignment until DTW convergence.
 - Helper functions: `extract_chunk_words`, `save_chunk_words` (also used by `synthesize_dataset_v2.py`).
 - CLI args: `--dali_id`, `--mode`, `--use_phonemes`, `--use_continuations`, `--use_f0`.
@@ -27,7 +27,7 @@ Dataset-scale driver for the target-first pipeline.
 - **Five-phase pipeline** amortising all expensive model loads:
   - **Phase 1 — Target Metadata**: Generate `music.json` + `chunk_words.json` from DALI. Collect inference tasks. Merges into cumulative `pending_inference_tasks.json` cache.
   - **Phase 2 — Inference**: SoulX-Singer inference for this batch via `_launch_inference_subprocess`. If Phase 1 was not run in this invocation, loads and filters the cumulative cache.
-  - **Phase 3 — Extraction**: ROSVOT note extraction + F0 via `batch/note_extraction_batch.py` subprocess for this batch.
+  - **Phase 3 — Extraction**: `music.json`+ F0 extraction via `batch/note_extraction_batch.py` subprocess for this batch.
   - **Phase 4 — Iterative Alignment**: Generate prior from `extracted_notes.json` via OpenUtau, iteratively adjusting note durations until DTW convergence. OpenUtau Player is initialised once before the batch loop and reused. Accepts optional `player` parameter.
   - **Phase 5 — Manifest**: Generate `manifest.csv` for ML training. Runs once after all batches complete.
 - `--phases` accepts `'12345'`, any subset. Each selected phase runs per-batch (except Phase 5). All phases independently resumable via sentinel files.

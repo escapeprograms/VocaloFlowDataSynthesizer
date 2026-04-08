@@ -35,7 +35,8 @@ except ImportError:
     import DALI as dali_code
 
 SOULX_DIR      = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "SoulX-Singer"))
-SOULX_PYTHON   = r"C:\Users\archi\miniconda3\envs\soulxsinger\python.exe"
+
+from config import SOULX_PYTHON
 DEFAULT_OUTPUT  = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "Data"))
 
 

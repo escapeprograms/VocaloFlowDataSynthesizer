@@ -39,12 +39,12 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 
 from stages.synthesizeTarget import process_dali_to_target, get_soulx_inference_config
 from pipelines.synthesize_v2 import save_chunk_words
+from config import SOULX_PYTHON
 
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
 
-SOULX_PYTHON   = r"C:\Users\archi\miniconda3\envs\soulxsinger\python.exe"
 SOULX_DIR      = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "SoulX-Singer"))
 DALI_ANNOT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "DALI", "DALI_v2.0", "annot_tismir"))
 DEFAULT_OUTPUT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "Data"))

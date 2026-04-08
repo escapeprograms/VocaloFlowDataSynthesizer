@@ -15,9 +15,10 @@ Vocoder integration for converting mel-spectrograms back to audio waveforms.
 - Lazy-loads models on first call; caches globally.
 
 ### `grab_midi.py`
-Small helper for converting frequencies into MIDI notation.
+Frequency-to-MIDI conversion and per-note pitch computation from F0.
 - `freq_to_midi(freq)`: Converts a raw Hz frequency into an integer MIDI note number.
 - `get_midi_pitch(freqs)`: Returns the closest MIDI pitch for an average over a list of frequencies.
+- `recompute_note_pitches(notes, f0, sr, hop)`: Recomputes `note_pitch` for each note from target F0 within its time window. Extracts F0 slice per note, computes mean voiced Hz, converts to MIDI via `freq_to_midi`. Also updates `mean_f0_hz` and `voiced_ratio` metadata. Falls back to existing `note_pitch` if no voiced frames found. Mutates notes in-place. Used by both `note_extraction_batch.py` (initial pitch) and `iterative_align.py` (pitch recalculation after duration adjustment).
 
 ### `determine_chunks.py`
 Chunking utility for segmenting a song based on DALI annotations.

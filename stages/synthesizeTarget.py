@@ -9,6 +9,8 @@ from pathlib import Path
 # Add DataSynthesizer root to path for cross-package imports
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
+from config import SOULX_PYTHON
+
 # Add SoulX-Singer to path to import its modules
 SOULX_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "SoulX-Singer"))
 sys.path.append(SOULX_DIR)
@@ -244,7 +246,7 @@ def process_dali_to_target(dali_id="006b5d1db6a447039c30443310b60c6f", language=
 
             batch_script = os.path.join(os.path.dirname(__file__), "..", "batch", "soulxsinger_batch_infer.py")
             cmd = [
-                r"C:\Users\archi\miniconda3\envs\soulxsinger\python.exe",
+                SOULX_PYTHON,
                 batch_script,
                 "--tasks_json", tasks_file,
                 "--model_path", model_path,
